@@ -1,0 +1,31 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+*.log
+
+# Generated datasets and experiment outputs
+datasets/interim/*
+datasets/processed/*
+results/tables/*
+results/figures/*
+results/checkpoints/*
+
+# Scientific/model artifacts should be regenerated from scripts, not committed
+*.npz
+*.nc
+*.pth
+*.onnx
+*.pkl
+*.joblib
+
+!datasets/interim/.gitkeep
+!datasets/processed/.gitkeep
+!results/tables/.gitkeep
+!results/figures/.gitkeep
+!results/checkpoints/.gitkeep

@@ -1,0 +1,13 @@
+pandas
+numexpr>=2.10.2
+numpy>=1.26,<2.3
+scipy
+matplotlib
+cartopy
+xarray
+netCDF4
+pyproj
+pyyaml
+pyarrow
+scikit-learn
+torch

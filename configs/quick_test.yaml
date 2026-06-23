@@ -1,0 +1,21 @@
+# Minimal single-day dataset build for smoke testing with the in-repo SP3 netCDF.
+project_name: raystec_china_20240505_quick
+tec_data_dir: E:/Scientific_Research/data/gnssTECmatFiles
+sp3_files:
+  - ../00_iri/mycode/ML_sTEC/Mydata/WUM2024(126)0505.nc
+output_dir: datasets/processed
+interim_dir: datasets/interim
+start_date: 2024-05-05
+end_date: 2024-05-05
+epoch_interval_seconds: 900
+select_window_seconds: 30
+sp3_tolerance_seconds: 900
+min_elevation_deg: 10
+stec_min: 0
+stec_max: 600
+output_format: parquet
+region:
+  lon_min: 80
+  lon_max: 140
+  lat_min: 0
+  lat_max: 60
