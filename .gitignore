@@ -9,6 +9,9 @@ __pycache__/
 Thumbs.db
 *.log
 
+# Local manuscript drafts are not pushed to GitHub
+manuscript/
+
 # Generated datasets and experiment outputs
 datasets/interim/*
 datasets/processed/*
