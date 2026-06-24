@@ -1,4 +1,4 @@
-"""Train Ridge and RandomForest direct-prediction STEC baselines."""
+"""Train Ridge and RandomForest tabular STEC baselines."""
 
 from __future__ import annotations
 
@@ -92,19 +92,50 @@ def choose_split(
     return train_df, test_df, metadata
 
 
+def ensure_residual_target(
+    df: pd.DataFrame,
+    *,
+    observed_column: str,
+    baseline_column: str,
+    residual_column: str,
+) -> pd.DataFrame:
+    """Ensure `residual_column = observed_column - baseline_column` exists."""
+
+    for column in [observed_column, baseline_column]:
+        if column not in df.columns:
+            raise KeyError(f"Residual learning requires column: {column}")
+    out = df.copy()
+    out[residual_column] = (
+        out[observed_column].astype(float) - out[baseline_column].astype(float)
+    )
+    return out
+
+
 def prepare_xy(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     *,
     target: str,
+    include_physical_baseline: bool = False,
+    physical_baseline_column: str = "stec_slm",
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, list[str], int, int]:
-    """Create aligned direct-prediction feature matrices."""
+    """Create aligned feature matrices for a train/test split."""
 
     if target not in train_df.columns or target not in test_df.columns:
         raise KeyError(f"Target column missing from split data: {target}")
 
-    x_train, y_train = build_feature_matrix(train_df, target=target)
-    x_test, y_test = build_feature_matrix(test_df, target=target)
+    x_train, y_train = build_feature_matrix(
+        train_df,
+        target=target,
+        include_physical_baseline=include_physical_baseline,
+        physical_baseline_column=physical_baseline_column,
+    )
+    x_test, y_test = build_feature_matrix(
+        test_df,
+        target=target,
+        include_physical_baseline=include_physical_baseline,
+        physical_baseline_column=physical_baseline_column,
+    )
     feature_cols = [col for col in x_train.columns if col in x_test.columns]
     if not feature_cols:
         raise ValueError("No usable feature columns found in the input table.")
@@ -127,7 +158,7 @@ def prepare_xy(
 
 
 def build_model(args: argparse.Namespace):
-    """Create the requested direct-prediction model."""
+    """Create the requested tabular model."""
 
     if args.model == "ridge":
         return build_ridge(alpha=args.ridge_alpha, random_state=args.seed)
@@ -163,18 +194,62 @@ def write_json(data: dict[str, Any], path: Path) -> Path:
     return path
 
 
-def train_direct_baseline(args: argparse.Namespace) -> dict[str, Any]:
-    """Train and evaluate a Ridge or RandomForest direct STEC baseline."""
+def _metrics_rows(
+    mode: str,
+    train_metrics: dict[str, float],
+    test_metrics: dict[str, float],
+    residual_train_metrics: dict[str, float] | None = None,
+    residual_test_metrics: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    rows = [
+        {"subset": "train", "metric_target": "stec_obs", **train_metrics},
+        {"subset": "test", "metric_target": "stec_obs", **test_metrics},
+    ]
+    if mode == "residual" and residual_train_metrics and residual_test_metrics:
+        rows.extend(
+            [
+                {
+                    "subset": "train",
+                    "metric_target": "stec_residual_slm",
+                    **residual_train_metrics,
+                },
+                {
+                    "subset": "test",
+                    "metric_target": "stec_residual_slm",
+                    **residual_test_metrics,
+                },
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def train_tabular_baseline(args: argparse.Namespace) -> dict[str, Any]:
+    """Train and evaluate a direct or SLM-residual Ridge/RF baseline."""
 
     input_path = Path(args.input)
     table_dir = Path(args.table_dir)
     checkpoint_dir = Path(args.checkpoint_dir)
-    run_name = args.run_name or f"direct_{args.model}_{args.split}"
-    pred_col = f"pred_{args.model}_direct"
+    run_name = args.run_name or f"{args.mode}_{args.model}_{args.split}"
+    residual_pred_col = f"pred_{args.model}_residual"
+    final_pred_col = f"pred_{args.model}_residual_stec"
+    direct_pred_col = f"pred_{args.model}_direct"
 
     df = read_table(input_path)
     if args.max_rows:
         df = df.head(args.max_rows).copy()
+
+    if args.mode == "residual":
+        df = ensure_residual_target(
+            df,
+            observed_column=args.target,
+            baseline_column=args.baseline_column,
+            residual_column=args.residual_target,
+        )
+        model_target = args.residual_target
+        pred_col = final_pred_col
+    else:
+        model_target = args.target
+        pred_col = direct_pred_col
 
     train_df, test_df, split_metadata = choose_split(
         df,
@@ -191,23 +266,58 @@ def train_direct_baseline(args: argparse.Namespace) -> dict[str, Any]:
         feature_cols,
         dropped_train,
         dropped_test,
-    ) = prepare_xy(train_df, test_df, target=args.target)
+    ) = prepare_xy(
+        train_df,
+        test_df,
+        target=model_target,
+        include_physical_baseline=args.include_baseline_feature,
+        physical_baseline_column=args.baseline_column,
+    )
 
     model = build_model(args)
     model.fit(x_train, y_train)
-    train_pred = model.predict(x_train)
-    test_pred = model.predict(x_test)
+    train_model_pred = model.predict(x_train)
+    test_model_pred = model.predict(x_test)
 
-    train_metrics = regression_metrics(y_train, train_pred)
-    test_metrics = regression_metrics(y_test, test_pred)
+    if args.mode == "residual":
+        train_eval_df = train_df.loc[y_train.index].copy()
+        test_eval_df = test_df.loc[y_test.index].copy()
+        train_final_pred = (
+            train_eval_df[args.baseline_column].to_numpy(float) + train_model_pred
+        )
+        test_final_pred = (
+            test_eval_df[args.baseline_column].to_numpy(float) + test_model_pred
+        )
+        train_metrics = regression_metrics(train_eval_df[args.target], train_final_pred)
+        test_metrics = regression_metrics(test_eval_df[args.target], test_final_pred)
+        residual_train_metrics = regression_metrics(y_train, train_model_pred)
+        residual_test_metrics = regression_metrics(y_test, test_model_pred)
 
-    predictions = test_df.loc[y_test.index].copy()
-    predictions[pred_col] = test_pred
+        predictions = test_eval_df.copy()
+        predictions[residual_pred_col] = test_model_pred
+        predictions[final_pred_col] = test_final_pred
+        model_prediction_column = residual_pred_col
+        final_prediction_column = final_pred_col
+    else:
+        train_metrics = regression_metrics(y_train, train_model_pred)
+        test_metrics = regression_metrics(y_test, test_model_pred)
+        residual_train_metrics = None
+        residual_test_metrics = None
+
+        predictions = test_df.loc[y_test.index].copy()
+        predictions[direct_pred_col] = test_model_pred
+        model_prediction_column = direct_pred_col
+        final_prediction_column = direct_pred_col
+
     prediction_path = save_table(
         predictions,
         table_dir / f"{run_name}_predictions.{args.output_format}",
     )
-    elevation_metrics = elevation_bin_metrics(predictions, pred_col=pred_col)
+    elevation_metrics = elevation_bin_metrics(
+        predictions,
+        pred_col=final_prediction_column,
+        target_col=args.target,
+    )
     elevation_metrics_path = save_table(
         elevation_metrics,
         table_dir / f"{run_name}_elevation_metrics.csv",
@@ -215,12 +325,16 @@ def train_direct_baseline(args: argparse.Namespace) -> dict[str, Any]:
 
     metadata = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "mode": "direct_prediction",
+        "mode": "direct_prediction" if args.mode == "direct" else "slm_residual",
         "model": args.model,
         "run_name": run_name,
         "input_file": str(input_path),
-        "target": args.target,
-        "prediction_column": pred_col,
+        "observed_target": args.target,
+        "model_target": model_target,
+        "baseline_column": args.baseline_column if args.mode == "residual" else None,
+        "model_prediction_column": model_prediction_column,
+        "final_prediction_column": final_prediction_column,
+        "include_baseline_feature": bool(args.include_baseline_feature),
         "feature_columns": feature_cols,
         "n_features": int(len(feature_cols)),
         "split": split_metadata,
@@ -251,17 +365,23 @@ def train_direct_baseline(args: argparse.Namespace) -> dict[str, Any]:
             "elevation_metrics": str(elevation_metrics_path),
         },
     }
+    if args.mode == "residual":
+        metadata["residual_metrics"] = {
+            "train": residual_train_metrics,
+            "test": residual_test_metrics,
+        }
 
     checkpoint_path = checkpoint_dir / f"{run_name}.joblib"
     metadata["outputs"]["checkpoint"] = str(
         save_checkpoint(model, checkpoint_path, metadata)
     )
     metrics_json_path = write_json(metadata, table_dir / f"{run_name}_metrics.json")
-    metrics_csv = pd.DataFrame(
-        [
-            {"subset": "train", **train_metrics},
-            {"subset": "test", **test_metrics},
-        ]
+    metrics_csv = _metrics_rows(
+        args.mode,
+        train_metrics,
+        test_metrics,
+        residual_train_metrics,
+        residual_test_metrics,
     )
     metrics_csv_path = save_table(metrics_csv, table_dir / f"{run_name}_metrics.csv")
     metadata["outputs"]["metrics_json"] = str(metrics_json_path)
@@ -274,6 +394,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Input parquet/CSV table.")
     parser.add_argument("--target", default="stec_obs")
+    parser.add_argument("--mode", choices=["direct", "residual"], default="direct")
+    parser.add_argument("--baseline-column", default="stec_slm")
+    parser.add_argument("--residual-target", default="stec_residual_slm")
+    parser.add_argument(
+        "--include-baseline-feature",
+        action="store_true",
+        help="Include the physical baseline column as a model feature.",
+    )
     parser.add_argument("--model", choices=["ridge", "random_forest"], required=True)
     parser.add_argument(
         "--split",
@@ -298,7 +426,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    metadata = train_direct_baseline(args)
+    metadata = train_tabular_baseline(args)
     print(json.dumps(metadata, indent=2, ensure_ascii=False))
     return 0
 

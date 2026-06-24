@@ -19,9 +19,9 @@ generalization tests.
   baseline.
 - [x] Add direct SLM evaluation metrics against `stec_obs`.
 - [x] Implement Ridge and RandomForest direct-prediction entry points.
-- [ ] Implement Ridge and RandomForest residual-learning entry points:
+- [x] Implement Ridge and RandomForest residual-learning entry points:
   `stec_obs - stec_slm`.
-- [ ] Implement RayMLP residual-learning entry point after SLM and tabular
+- [x] Implement RayMLP residual-learning entry point after SLM and tabular
   baselines are stable.
 - [ ] Implement random, time, station, and PRN split experiments.
 - [ ] Add elevation-bin, station-bin, PRN-bin, and time-bin metrics.
@@ -34,8 +34,8 @@ generalization tests.
 
 Provide an independent VTEC source for the existing one-day dataset, then run
 `src.slm_baseline` to create the first science-useful `stec_slm` product.
-Next, run Ridge/RandomForest direct baselines across strict splits and then
-implement residual-learning baselines.
+Next, replace diagnostic constant-VTEC smoke data with an independent VTEC
+source, then run SLM, direct ML, and residual ML baselines across strict splits.
 
 ## Blocked / Needs User Decision
 

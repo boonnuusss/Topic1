@@ -67,3 +67,36 @@ cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
 
 Use `-MaxRows 5000` for quick smoke tests. Results are written under
 `results/tables/` and `results/checkpoints/`.
+
+## Residual ML Baselines
+
+Train Ridge residual learning on an SLM table:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\train_residual_baselines.ps1 `
+  -Model ridge `
+  -InputPath datasets\processed\raystec_china_20240505_slm.parquet `
+  -Split random `
+  -RunName residual_ridge_random
+```
+
+Train RandomForest residual learning:
+
+```powershell
+.\scripts\train_residual_baselines.ps1 `
+  -Model random_forest `
+  -InputPath datasets\processed\raystec_china_20240505_slm.parquet `
+  -Split random `
+  -RunName residual_rf_random
+```
+
+Train RayMLP residual learning:
+
+```powershell
+.\scripts\train_ray_mlp_residual.ps1 `
+  -InputPath datasets\processed\raystec_china_20240505_slm.parquet `
+  -Split random `
+  -Epochs 30 `
+  -RunName residual_ray_mlp_random
+```

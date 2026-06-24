@@ -148,6 +148,41 @@ Supported split modes are `random`, `time`, `station`, and `prn`. The entry
 point writes metrics, elevation-bin metrics, test-set predictions, and a
 checkpoint under `results/`.
 
+## Residual ML Baselines
+
+After an SLM table exists, Ridge/RandomForest can learn the SLM residual:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_tree `
+  --mode residual `
+  --input datasets/processed/raystec_china_20240505_slm.parquet `
+  --model ridge `
+  --split random `
+  --run-name residual_ridge_random
+```
+
+The residual model target is:
+
+```text
+stec_residual_slm = stec_obs - stec_slm
+```
+
+The final prediction evaluated against `stec_obs` is:
+
+```text
+predicted STEC = stec_slm + predicted residual
+```
+
+RayMLP residual learning uses:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_mlp `
+  --input datasets/processed/raystec_china_20240505_slm.parquet `
+  --split random `
+  --epochs 30 `
+  --run-name residual_ray_mlp_random
+```
+
 ## Reproducibility Rules
 
 - Do not overwrite raw TEC, SP3, IRI, or model artifact files.

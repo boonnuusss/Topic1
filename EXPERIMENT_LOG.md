@@ -214,3 +214,44 @@ learning.
     test RMSE `4.4243` TECU, MAE `2.6906` TECU, R2 `0.9092`.
   - Smoke-test metrics are not final scientific results because they use row
     caps and random splits.
+
+## 2026-06-24 Experiment 009: Residual ML Entry Points
+
+### Goal
+
+Implement ML models that learn the SLM residual and evaluate the final
+prediction `stec_slm + predicted residual` against `stec_obs`.
+
+### Changes
+
+- Extended `src.train_tree` with `--mode residual` for Ridge and RandomForest.
+- Added `scripts/train_residual_baselines.ps1`.
+- Implemented `src.train_mlp` for RayMLP residual learning.
+- Added `scripts/train_ray_mlp_residual.ps1`.
+- Updated README, script docs, and TODO.
+
+### Notes
+
+- Residual target: `stec_residual_slm = stec_obs - stec_slm`.
+- Final prediction column:
+  - Ridge/RF: `pred_<model>_residual_stec`.
+  - RayMLP: `pred_ray_mlp_residual_stec`.
+- Inputs must contain `stec_slm`; diagnostic smoke tests used
+  `datasets/interim/slm_full_smoke.parquet`.
+
+### Validation
+
+- `python -m py_compile src/train_tree.py src/train_mlp.py src/models/mlp.py`
+  passed.
+- `python -m src.train_tree --help` and `python -m src.train_mlp --help`
+  passed.
+- Ridge residual smoke test on first `5000` diagnostic SLM rows passed:
+  final-STEC test RMSE `9.8034` TECU, MAE `5.9130` TECU, R2 `0.6293`.
+- RandomForest residual smoke test on first `3000` diagnostic SLM rows with
+  `10` trees passed: final-STEC test RMSE `3.0272` TECU, MAE `1.9361` TECU,
+  R2 `0.9575`.
+- RayMLP residual smoke test on first `1000` diagnostic SLM rows with `2`
+  epochs passed: final-STEC test RMSE `8.8321` TECU, MAE `5.7820` TECU,
+  R2 `0.5858`.
+- These metrics are entry-point smoke tests only because the SLM table used
+  diagnostic constant VTEC and random splits.
