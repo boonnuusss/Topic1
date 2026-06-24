@@ -76,16 +76,17 @@ Each row is one receiver-satellite ray at one epoch.
 | `elevation_sin`, `elevation_cos` | Elevation trigonometric encoding |
 | `constellation_*` | One-hot constellation indicators |
 
-## Planned Physical Baseline Columns
+## SLM Physical Baseline Columns
 
-These columns are part of the revised modeling route and may be absent from the
-current quick parquet until the SLM baseline builder is run.
+These columns are produced by `python -m src.slm_baseline`. They may be absent
+from the current quick parquet until an independent VTEC source is attached.
 
 | Column | Meaning | Unit / Type |
 | --- | --- | --- |
 | `vtec_baseline` | Independent vertical TEC used by the single-layer model | TECU |
 | `vtec_source` | Source label, for example `IRI` or `GIM` | string |
 | `shell_height_km` | Thin-shell height used by the mapping function | km |
+| `slm_mapping_factor` | SLM mapping factor computed for `shell_height_km` | unitless |
 | `stec_slm` | Single-layer model prediction, `M(elevation) * vtec_baseline` | TECU |
 | `stec_residual_slm` | Residual target, `stec_obs - stec_slm` | TECU |
 

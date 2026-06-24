@@ -14,9 +14,10 @@ def add_single_layer_baseline(
     df: pd.DataFrame,
     vtec_column: str = "vtec_baseline",
     output_column: str = "stec_slm",
-    mapping_column: str = "slant_factor",
+    mapping_column: str = "slm_mapping_factor",
     elevation_column: str = "elevation",
     shell_height_km: float = 450.0,
+    use_existing_mapping: bool = False,
 ) -> pd.DataFrame:
     """Add a thin-shell single-layer STEC baseline.
 
@@ -32,13 +33,11 @@ def add_single_layer_baseline(
         raise KeyError(f"Missing VTEC baseline column: {vtec_column}")
 
     out = df.copy()
-    if mapping_column in out.columns:
+    if use_existing_mapping and mapping_column in out.columns:
         mapping = out[mapping_column].astype(float)
     else:
         if elevation_column not in out.columns:
-            raise KeyError(
-                f"Missing {mapping_column!r} and {elevation_column!r} columns."
-            )
+            raise KeyError(f"Missing required elevation column: {elevation_column}")
         mapping = compute_slant_factor(
             out[elevation_column].astype(float),
             shell_height_km=shell_height_km,

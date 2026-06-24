@@ -13,12 +13,12 @@ generalization tests.
 - [x] Build one-day 2024-05-05 ray-wise STEC dataset.
 - [x] Add Cartopy-based IPP/STEC diagnostic figure notebook.
 - [x] Add agent-facing project brain files.
-- [ ] Implement single-layer mapping baseline entry point producing
+- [x] Implement single-layer mapping baseline entry point producing
   `stec_slm`.
-- [ ] Record the VTEC source, shell height, and mapping formula used by the SLM
+- [x] Record the VTEC source, shell height, and mapping formula used by the SLM
   baseline.
-- [ ] Add direct SLM evaluation metrics against `stec_obs`.
-- [ ] Implement Ridge and RandomForest direct-prediction entry points.
+- [x] Add direct SLM evaluation metrics against `stec_obs`.
+- [x] Implement Ridge and RandomForest direct-prediction entry points.
 - [ ] Implement Ridge and RandomForest residual-learning entry points:
   `stec_obs - stec_slm`.
 - [ ] Implement RayMLP residual-learning entry point after SLM and tabular
@@ -32,9 +32,10 @@ generalization tests.
 
 ## Highest Priority Next
 
-Implement the single-layer mapping baseline for the existing one-day dataset
-before ML training. This anchors all later Ridge, RandomForest, and RayMLP
-results to the classical ionospheric projection model.
+Provide an independent VTEC source for the existing one-day dataset, then run
+`src.slm_baseline` to create the first science-useful `stec_slm` product.
+Next, run Ridge/RandomForest direct baselines across strict splits and then
+implement residual-learning baselines.
 
 ## Blocked / Needs User Decision
 

@@ -32,6 +32,16 @@ BASE_FEATURE_COLUMNS = [
 ]
 
 
+CONSTELLATION_FEATURE_COLUMNS = [
+    "constellation_gps",
+    "constellation_glonass",
+    "constellation_galileo",
+    "constellation_bds",
+    "constellation_sbas",
+    "constellation_qzss",
+]
+
+
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add UTC, DOY, and IPP local-time cyclical encodings."""
 
@@ -71,7 +81,7 @@ def add_constellation_onehot(df: pd.DataFrame) -> pd.DataFrame:
 def feature_columns(include_iri: bool = False) -> list[str]:
     """Return default model feature columns."""
 
-    columns = list(BASE_FEATURE_COLUMNS)
+    columns = list(BASE_FEATURE_COLUMNS) + list(CONSTELLATION_FEATURE_COLUMNS)
     if include_iri:
         columns.append("stec_iri")
     return columns

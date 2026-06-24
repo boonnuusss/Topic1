@@ -99,6 +99,55 @@ datasets/processed/metadata_raystec_china_20240505_quick.json
 It contains 199,087 valid ray-wise samples from 2024-05-05 over
 80E-140E, 0N-60N, after basic quality control.
 
+## SLM Baseline
+
+The single-layer mapping entry point is:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.slm_baseline `
+  --input datasets/processed/raystec_china_20240505.parquet `
+  --output datasets/processed/raystec_china_20240505_slm.parquet `
+  --vtec-table path\to\independent_vtec.parquet `
+  --vtec-table-column vtec_baseline `
+  --vtec-source IRI `
+  --shell-height-km 450
+```
+
+The command writes `vtec_baseline`, `vtec_source`, `shell_height_km`,
+`slm_mapping_factor`, `stec_slm`, and `stec_residual_slm`, plus a metadata JSON
+next to the output table. The VTEC table is expected to provide row-wise
+independent VTEC values, merged by `timestamp station prn` unless
+`--vtec-merge-keys` is supplied.
+
+For smoke tests only, a constant VTEC can be used with
+`--vtec-constant <TECU> --allow-diagnostic-constant`. Do not use that diagnostic
+mode for scientific baseline results.
+
+## Direct ML Baselines
+
+Ridge and RandomForest direct-prediction baselines are trained with:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_tree `
+  --input datasets/processed/raystec_china_20240505.parquet `
+  --model ridge `
+  --split random `
+  --run-name direct_ridge_random
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_tree `
+  --input datasets/processed/raystec_china_20240505.parquet `
+  --model random_forest `
+  --split random `
+  --rf-n-estimators 300 `
+  --run-name direct_rf_random
+```
+
+Supported split modes are `random`, `time`, `station`, and `prn`. The entry
+point writes metrics, elevation-bin metrics, test-set predictions, and a
+checkpoint under `results/`.
+
 ## Reproducibility Rules
 
 - Do not overwrite raw TEC, SP3, IRI, or model artifact files.
