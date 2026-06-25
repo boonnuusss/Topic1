@@ -69,6 +69,38 @@ whether the model improves on classical ionospheric practice. The current route
 uses the single-layer model as the first baseline, then evaluates direct ML and
 SLM residual learning against that reference.
 
+## Pitfall: Confusing The SLM Direction
+
+### Problem
+
+The project briefly treated the single-layer model as a STEC prediction
+baseline:
+
+```text
+STEC_slm = M(elevation) * VTEC
+```
+
+and then built direct/residual STEC prediction entry points around that target.
+
+### Cause
+
+That route answers a different question: "How well can the pipeline predict
+observed STEC?" The current Topic1 question is instead: "Can STEC modeling
+improve STEC-to-VTEC conversion?"
+
+### Fix
+
+The current mainline SLM baseline must use the inverse conversion:
+
+```text
+VTEC_slm = STEC_obs / M(elevation)
+```
+
+Use `python -m src.slm_vtec` for the mainline SLM VTEC product. Keep
+`src.slm_baseline`, direct Ridge/RandomForest, residual Ridge/RandomForest, and
+RayMLP residual learning as legacy/off-mainline code unless a task explicitly
+reactivates them.
+
 ## Pitfall: Codex Sandbox Cannot Launch Local Python
 
 ### Problem

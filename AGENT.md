@@ -3,24 +3,31 @@
 ## Project Goal
 
 Build a reproducible ray-wise GNSS STEC dataset and modeling pipeline for
-regional ionosphere research. The central task is to predict observed slant TEC
-directly at the receiver-satellite ray level, rather than first mapping
-observations to a regular VTEC grid.
+STEC-to-VTEC conversion research. The central task is to use STEC modeling to
+improve or evaluate VTEC retrieval from slant observations, not to treat
+standalone STEC prediction as the final scientific goal.
 
 ## Scientific Background
 
 Each sample represents one GNSS receiver, one satellite PRN, and one UTC epoch.
 The current scientific hypothesis is that explicit ray geometry, IPP location,
-time encoding, and physical model priors can improve STEC prediction compared
-with a traditional single-layer ionospheric projection baseline.
+time encoding, and physical model priors can help reduce VTEC conversion error
+relative to the traditional single-layer mapping model.
 
-Modeling should proceed in this order:
+The current mainline should proceed in this order:
 
-1. Traditional single-layer model baseline:
-   `STEC_slm = M(elevation) * VTEC(IPP, time)`.
-2. Direct tabular ML baselines, starting with Ridge and RandomForest.
-3. Residual learning relative to the SLM baseline.
-4. RayMLP only after the physical and tabular baselines are stable.
+1. Traditional single-layer STEC-to-VTEC conversion baseline:
+   `VTEC_slm = STEC_obs / M(elevation)`.
+2. IRI-backed simulation experiment with documented reference VTEC and
+   simulated ray-wise STEC labels.
+3. Ray-wise ML STEC modeling, with RayMLP as the preferred neural entry point
+   after simulation labels and SLM metrics are stable.
+4. Main evaluation in VTEC space: SLM conversion error versus ML-assisted
+   conversion error.
+
+Do not frame the mainline as direct prediction of observed `stec_obs`. The
+previous `stec_slm`, direct STEC prediction, and residual-learning entry points
+are legacy/off-mainline unless a task explicitly reactivates them.
 
 ## Required Reading Before Work
 
@@ -37,7 +44,8 @@ Before editing or running experiments, read:
 1. Do not overwrite raw TEC `.mat`, SP3, NetCDF, PyIRI, coefficient, model, or
    source data files.
 2. Keep scientific assumptions explicit: units, coordinate systems, PRN mapping,
-   time basis, selection window, region, and quality thresholds.
+   time basis, selection window, region, quality thresholds, shell height, and
+   mapping formula.
 3. Prefer reusable Python modules and command-line entry points over large
    notebook-only workflows.
 4. Run a small test before full multi-day processing.
@@ -47,8 +55,8 @@ Before editing or running experiments, read:
 7. Do not invent references, numerical results, or physical interpretations.
 8. Separate observation, inference, and speculation. Mark uncertain statements as
    `[UNCERTAIN]`.
-9. Watch for data leakage, unit errors, coordinate errors, time conversion
-   errors, hard-coded paths, and inefficient loops.
+9. Watch for SLM direction errors, data leakage, unit errors, coordinate errors,
+   time conversion errors, hard-coded paths, and inefficient loops.
 10. Treat generated datasets, figures, and checkpoints as artifacts. Do not
     delete or regenerate them unless the task explicitly asks for it.
 
@@ -64,7 +72,7 @@ E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe
 For example:
 
 ```powershell
-E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe -m src.dataset_builder --config configs/quick_test.yaml
+E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe -m src.slm_vtec --help
 ```
 
 Inside Codex, the default sandbox may refuse to launch the user's local Python

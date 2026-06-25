@@ -1,4 +1,9 @@
-"""Build a single-layer ionosphere mapping baseline for ray-wise STEC tables."""
+"""Legacy/off-mainline SLM STEC baseline for ray-wise tables.
+
+This entry point computes ``STEC_slm = M(elevation) * VTEC``. The current
+Topic1 mainline uses ``src.slm_vtec`` instead for STEC-to-VTEC conversion:
+``VTEC_slm = STEC_obs / M(elevation)``.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,9 @@
-"""Train Ridge and RandomForest tabular STEC baselines."""
+"""Legacy/off-mainline Ridge and RandomForest STEC baselines.
+
+These entry points predict observed STEC directly or learn residuals relative
+to legacy ``stec_slm``. The current Topic1 mainline evaluates models by their
+effect on STEC-to-VTEC conversion error.
+"""
 
 from __future__ import annotations
 

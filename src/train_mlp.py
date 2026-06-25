@@ -1,4 +1,9 @@
-"""Train a RayMLP residual-learning baseline on top of SLM STEC."""
+"""Legacy/off-mainline RayMLP residual learning on top of SLM STEC.
+
+The current Topic1 mainline should adapt RayMLP to the IRI-backed
+STEC-to-VTEC conversion experiment instead of treating this residual STEC
+prediction entry point as the final scientific route.
+"""
 
 from __future__ import annotations
 

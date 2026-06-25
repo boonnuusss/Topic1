@@ -2,9 +2,9 @@
 
 ## Current Milestone
 
-Turn the one-day ray-wise STEC dataset builder into a publishable baseline
-system with a traditional single-layer physical baseline and strict
-generalization tests.
+Turn the one-day ray-wise STEC dataset into a STEC-to-VTEC conversion benchmark:
+first with the traditional single-layer mapping baseline, then with an
+IRI-backed simulation experiment for ML-assisted conversion.
 
 ## Task List
 
@@ -13,31 +13,50 @@ generalization tests.
 - [x] Build one-day 2024-05-05 ray-wise STEC dataset.
 - [x] Add Cartopy-based IPP/STEC diagnostic figure notebook.
 - [x] Add agent-facing project brain files.
-- [x] Implement single-layer mapping baseline entry point producing
+- [x] Reframe the project from standalone STEC prediction to STEC modeling for
+  STEC-to-VTEC conversion.
+- [x] Implement mainline SLM STEC-to-VTEC conversion entry point:
+  `vtec_slm = stec_obs / slm_mapping_factor`.
+- [x] Keep previously implemented `stec_slm`, direct STEC prediction, and
+  residual-learning code as legacy/off-mainline code.
+- [x] Run `src.slm_vtec` on the full one-day parquet and inspect the resulting
+  `vtec_slm` distribution.
+- [x] Add VTEC diagnostic plots: map of `vtec_slm`, elevation-bin distribution,
+  station-bin distribution, and time evolution.
+- [ ] Design the IRI-backed simulation schema: reference VTEC, simulated STEC,
+  shell height, integration assumptions, and metadata.
+- [ ] Implement the IRI simulation dataset builder.
+- [ ] Define VTEC-space metrics for SLM versus ML-assisted conversion.
+- [ ] Adapt RayMLP training to the simulation setting.
+- [ ] Compare SLM conversion and RayMLP-assisted conversion under random, time,
+  station, and PRN splits.
+- [ ] Add paper-quality result figures and tables.
+- [ ] Draft methods section after the SLM and IRI simulation results are stable.
+- [ ] After the one-day benchmark is stable, choose ordinary additional days for
+  multi-day regional generalization tests.
+
+## Legacy Completed Work
+
+These items were completed during the earlier STEC-prediction route. They are
+preserved for reference but are not the current mainline:
+
+- [x] Implement `src.slm_baseline` producing `stec_slm`.
+- [x] Record VTEC source, shell height, and mapping formula for legacy
   `stec_slm`.
-- [x] Record the VTEC source, shell height, and mapping formula used by the SLM
-  baseline.
 - [x] Add direct SLM evaluation metrics against `stec_obs`.
 - [x] Implement Ridge and RandomForest direct-prediction entry points.
 - [x] Implement Ridge and RandomForest residual-learning entry points:
   `stec_obs - stec_slm`.
-- [x] Implement RayMLP residual-learning entry point after SLM and tabular
-  baselines are stable.
-- [ ] Implement random, time, station, and PRN split experiments.
-- [ ] Add elevation-bin, station-bin, PRN-bin, and time-bin metrics.
-- [ ] Add paper-quality result figures and tables.
-- [ ] Draft methods section after baseline results are stable.
-- [ ] After baseline evaluation is stable, choose ordinary additional days for
-  multi-day regional generalization tests.
+- [x] Implement RayMLP residual-learning entry point on top of `stec_slm`.
 
 ## Highest Priority Next
 
-Provide an independent VTEC source for the existing one-day dataset, then run
-`src.slm_baseline` to create the first science-useful `stec_slm` product.
-Next, replace diagnostic constant-VTEC smoke data with an independent VTEC
-source, then run SLM, direct ML, and residual ML baselines across strict splits.
+Design the IRI-backed simulation schema: define reference VTEC, simulated STEC,
+shell height, integration assumptions, bias assumptions, and metadata fields.
 
 ## Blocked / Needs User Decision
 
 - Need decision on whether to keep `rec_h = 0.0` for all stations or parse
   receiver height from another source.
+- Need design choice for IRI simulation: simple shell-level mapping first, or
+  full ray integration through IRI electron density profiles.

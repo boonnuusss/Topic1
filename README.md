@@ -1,33 +1,50 @@
-# Topic1 Ray-wise STEC Pipeline
+# Topic1 Ray-wise STEC-to-VTEC Pipeline
 
-`Topic1` is the reproducible research pipeline for ray-wise GNSS STEC
-modeling. Each sample is one receiver-satellite ray at one epoch:
+`Topic1` is the reproducible research pipeline for using ray-wise GNSS STEC
+modeling to improve STEC-to-VTEC conversion. Each basic observation is one
+receiver-satellite ray at one epoch:
 
 ```text
 station + PRN + timestamp -> observed STEC
 ```
 
-The current goal is to build a clean, auditable dataset and then compare a
-traditional single-layer ionosphere baseline, direct machine-learning models,
-and residual-learning models for regional STEC prediction.
+The main scientific target is not standalone STEC prediction. The target is to
+test whether ray-wise STEC models, including RayMLP, can reduce VTEC conversion
+error compared with the traditional single-layer mapping model.
 
 ## Modeling Route
 
-The modeling route is intentionally ordered from physical reference to more
-flexible statistical models:
+The current route is:
 
-1. Build a traditional single-layer mapping baseline:
-   `STEC_slm = M(elevation) * VTEC(IPP, time)`.
-2. Evaluate direct machine-learning models, such as Ridge and RandomForest, for
-   predicting `stec_obs` from ray-wise geometry, IPP, and time features.
-3. Evaluate residual-learning models, where ML predicts
-   `stec_obs - stec_slm` and the final prediction is
-   `stec_slm + residual_pred`.
-4. Add RayMLP after the physical baseline and tabular baselines are stable.
+1. Build a clean ray-wise STEC observation table.
+2. Build the traditional single-layer mapping conversion baseline:
+   `VTEC_slm = STEC_obs / M(elevation)`.
+3. Use IRI-generated background ionosphere fields to run controlled simulation
+   experiments with known reference VTEC/STEC relationships.
+4. Train ray-wise ML STEC models, starting with RayMLP after the simulation
+   labels and SLM baseline are stable.
+5. Compare SLM and ML-assisted STEC-to-VTEC conversion in VTEC space, using
+   metrics such as VTEC RMSE, MAE, bias, elevation-bin error, station-bin error,
+   PRN-bin error, and spatial residual maps.
 
-This order keeps the scientific comparison anchored to the classical
-thin-shell ionospheric projection model before introducing more flexible ML
-models.
+This order keeps the comparison anchored to the classical thin-shell
+ionospheric projection model while making the evaluation target clear:
+conversion accuracy from STEC to VTEC.
+
+## Legacy Off-mainline Code
+
+The following entry points were implemented during an earlier STEC-prediction
+route and are retained for reference, smoke tests, or later reuse:
+
+- `src.slm_baseline`: computes `STEC_slm = M(elevation) * VTEC`.
+- `src.train_tree --mode direct`: direct Ridge/RandomForest prediction of
+  `stec_obs`.
+- `src.train_tree --mode residual`: residual learning of
+  `stec_obs - stec_slm`.
+- `src.train_mlp`: RayMLP residual learning on top of `stec_slm`.
+
+They are not the current mainline unless a later experiment explicitly brings
+them back into the STEC-to-VTEC conversion design.
 
 ## Agent Project Brain
 
@@ -99,89 +116,52 @@ datasets/processed/metadata_raystec_china_20240505_quick.json
 It contains 199,087 valid ray-wise samples from 2024-05-05 over
 80E-140E, 0N-60N, after basic quality control.
 
-## SLM Baseline
+## SLM STEC-to-VTEC Baseline
 
-The single-layer mapping entry point is:
+The current physical baseline entry point is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.slm_baseline `
+.\.venv\Scripts\python.exe -m src.slm_vtec `
   --input datasets/processed/raystec_china_20240505.parquet `
-  --output datasets/processed/raystec_china_20240505_slm.parquet `
-  --vtec-table path\to\independent_vtec.parquet `
-  --vtec-table-column vtec_baseline `
-  --vtec-source IRI `
+  --output datasets/processed/rayvtec_china_20240505_slm.parquet `
   --shell-height-km 450
 ```
 
-The command writes `vtec_baseline`, `vtec_source`, `shell_height_km`,
-`slm_mapping_factor`, `stec_slm`, and `stec_residual_slm`, plus a metadata JSON
-next to the output table. The VTEC table is expected to provide row-wise
-independent VTEC values, merged by `timestamp station prn` unless
-`--vtec-merge-keys` is supplied.
-
-For smoke tests only, a constant VTEC can be used with
-`--vtec-constant <TECU> --allow-diagnostic-constant`. Do not use that diagnostic
-mode for scientific baseline results.
-
-## Direct ML Baselines
-
-Ridge and RandomForest direct-prediction baselines are trained with:
+Equivalent wrapper:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.train_tree `
-  --input datasets/processed/raystec_china_20240505.parquet `
-  --model ridge `
-  --split random `
-  --run-name direct_ridge_random
+.\scripts\build_slm_vtec.ps1
 ```
 
-```powershell
-.\.venv\Scripts\python.exe -m src.train_tree `
-  --input datasets/processed/raystec_china_20240505.parquet `
-  --model random_forest `
-  --split random `
-  --rf-n-estimators 300 `
-  --run-name direct_rf_random
-```
-
-Supported split modes are `random`, `time`, `station`, and `prn`. The entry
-point writes metrics, elevation-bin metrics, test-set predictions, and a
-checkpoint under `results/`.
-
-## Residual ML Baselines
-
-After an SLM table exists, Ridge/RandomForest can learn the SLM residual:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.train_tree `
-  --mode residual `
-  --input datasets/processed/raystec_china_20240505_slm.parquet `
-  --model ridge `
-  --split random `
-  --run-name residual_ridge_random
-```
-
-The residual model target is:
+The command writes:
 
 ```text
-stec_residual_slm = stec_obs - stec_slm
+shell_height_km
+slm_mapping_factor
+vtec_slm
+vtec_slm_source
 ```
 
-The final prediction evaluated against `stec_obs` is:
+The formula is:
 
 ```text
-predicted STEC = stec_slm + predicted residual
+VTEC_slm = STEC_obs / M(elevation)
 ```
 
-RayMLP residual learning uses:
+This is the traditional SLM conversion baseline. It does not predict STEC; it
+maps observed STEC to a vertical TEC estimate.
 
-```powershell
-.\.venv\Scripts\python.exe -m src.train_mlp `
-  --input datasets/processed/raystec_china_20240505_slm.parquet `
-  --split random `
-  --epochs 30 `
-  --run-name residual_ray_mlp_random
-```
+## IRI Simulation Target
+
+The next mainline step is to build an IRI-backed simulation experiment:
+
+1. Generate or sample IRI background electron density/VTEC for IPP/time
+   conditions.
+2. Produce ray-wise simulated STEC or reference VTEC labels with known
+   provenance.
+3. Apply the SLM conversion baseline to estimate VTEC from STEC.
+4. Train RayMLP-style STEC models under the same simulation setup.
+5. Compare SLM and ML-assisted conversion errors against the IRI reference VTEC.
 
 ## Reproducibility Rules
 

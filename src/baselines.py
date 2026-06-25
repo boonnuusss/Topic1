@@ -1,4 +1,4 @@
-"""Physical baseline helpers for ray-wise STEC modeling."""
+"""Physical baseline helpers for ray-wise STEC-to-VTEC modeling."""
 
 from __future__ import annotations
 
@@ -45,6 +45,49 @@ def add_single_layer_baseline(
         out[mapping_column] = mapping
 
     out[output_column] = out[vtec_column].astype(float) * mapping
+    out["shell_height_km"] = shell_height_km
+    return out
+
+
+def add_slm_vtec_from_stec(
+    df: pd.DataFrame,
+    stec_column: str = "stec_obs",
+    output_column: str = "vtec_slm",
+    mapping_column: str = "slm_mapping_factor",
+    elevation_column: str = "elevation",
+    shell_height_km: float = 450.0,
+    use_existing_mapping: bool = False,
+) -> pd.DataFrame:
+    """Add the classical thin-shell VTEC estimate from observed STEC.
+
+    The current Topic1 mainline uses the single-layer mapping model as the
+    traditional STEC-to-VTEC conversion baseline:
+
+    ``VTEC_slm = STEC_obs / M(elevation)``
+
+    where ``M`` is the thin-shell mapping factor. This is intentionally the
+    inverse direction of the legacy STEC-prediction helper above.
+    """
+
+    if stec_column not in df.columns:
+        raise KeyError(f"Missing observed STEC column: {stec_column}")
+
+    out = df.copy()
+    if use_existing_mapping and mapping_column in out.columns:
+        mapping = out[mapping_column].astype(float)
+    else:
+        if elevation_column not in out.columns:
+            raise KeyError(f"Missing required elevation column: {elevation_column}")
+        mapping = compute_slant_factor(
+            out[elevation_column].astype(float),
+            shell_height_km=shell_height_km,
+        )
+        out[mapping_column] = mapping
+
+    if (mapping <= 0).any():
+        raise ValueError(f"{mapping_column} must be positive for VTEC conversion.")
+
+    out[output_column] = out[stec_column].astype(float) / mapping
     out["shell_height_km"] = shell_height_km
     return out
 

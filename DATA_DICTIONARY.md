@@ -2,7 +2,7 @@
 
 ## Processed Dataset
 
-Current file:
+Current ray-wise STEC file:
 
 ```text
 datasets/processed/raystec_china_20240505.parquet
@@ -10,11 +10,21 @@ datasets/processed/raystec_china_20240505.parquet
 
 Each row is one receiver-satellite ray at one epoch.
 
+Current SLM VTEC conversion target file:
+
+```text
+datasets/processed/rayvtec_china_20240505_slm.parquet
+```
+
+This file is produced by `python -m src.slm_vtec` and adds the traditional
+single-layer STEC-to-VTEC conversion baseline.
+
 ## Provenance
 
 - TEC observations: `E:/Scientific_Research/data/gnssTECmatFiles/2024/126/*.mat`
 - Orbit data: `../00_iri/mycode/ML_sTEC/Mydata/WUM2024(126)0505.nc`
 - Builder: `python -m src.dataset_builder --config configs/quick_test.yaml`
+- SLM VTEC conversion: `python -m src.slm_vtec`
 
 ## Core Columns
 
@@ -27,7 +37,7 @@ Each row is one receiver-satellite ray at one epoch.
 | `station` | Receiver station code | string |
 | `prn` | Mapped satellite PRN | integer |
 | `constellation` | GNSS constellation inferred from mapped PRN | string |
-| `stec_obs` | Observed slant TEC target | TECU |
+| `stec_obs` | Observed slant TEC input | TECU |
 | `stec_iri` | Legacy/reserved IRI-derived STEC column | TECU / currently empty |
 | `valid_flag` | Passed quality control | boolean |
 
@@ -59,7 +69,7 @@ Each row is one receiver-satellite ray at one epoch.
 | `ipp_lat` | Ionospheric pierce point latitude | degree |
 | `elevation` | Receiver-satellite elevation angle | degree |
 | `azimuth` | Receiver-satellite azimuth angle | degree |
-| `slant_factor` | Thin-shell mapping factor | unitless |
+| `slant_factor` | Thin-shell mapping factor from the dataset builder | unitless |
 | `ray_length` | Receiver-satellite straight-line distance | meter |
 | `los_x`, `los_y`, `los_z` | Unit line-of-sight vector | unitless |
 
@@ -76,19 +86,46 @@ Each row is one receiver-satellite ray at one epoch.
 | `elevation_sin`, `elevation_cos` | Elevation trigonometric encoding |
 | `constellation_*` | One-hot constellation indicators |
 
-## SLM Physical Baseline Columns
+## Mainline SLM VTEC Conversion Columns
 
-These columns are produced by `python -m src.slm_baseline`. They may be absent
-from the current quick parquet until an independent VTEC source is attached.
+These columns are produced by `python -m src.slm_vtec`.
 
 | Column | Meaning | Unit / Type |
 | --- | --- | --- |
-| `vtec_baseline` | Independent vertical TEC used by the single-layer model | TECU |
-| `vtec_source` | Source label, for example `IRI` or `GIM` | string |
 | `shell_height_km` | Thin-shell height used by the mapping function | km |
 | `slm_mapping_factor` | SLM mapping factor computed for `shell_height_km` | unitless |
-| `stec_slm` | Single-layer model prediction, `M(elevation) * vtec_baseline` | TECU |
-| `stec_residual_slm` | Residual target, `stec_obs - stec_slm` | TECU |
+| `vtec_slm` | Traditional SLM conversion result, `stec_obs / slm_mapping_factor` | TECU |
+| `vtec_slm_source` | Provenance label for `vtec_slm` | string |
+
+The current mainline formula is:
+
+```text
+VTEC_slm = STEC_obs / M(elevation)
+```
+
+## Future IRI Simulation Columns
+
+Names may be refined when the IRI simulation builder is implemented, but the
+intended meanings are:
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `vtec_ref_iri` | Reference VTEC generated from IRI background ionosphere | TECU |
+| `stec_sim_iri` | Simulated ray-wise STEC derived from the IRI background | TECU |
+| `iri_model_version` | IRI/PyIRI version or configuration label | string |
+| `iri_assumption_notes` | Compact label for simulation assumptions | string |
+
+## Legacy Off-mainline Columns
+
+These columns are produced by `python -m src.slm_baseline` and were introduced
+for an earlier STEC-prediction route. They are not the current mainline target.
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `vtec_baseline` | External VTEC value used to predict STEC | TECU |
+| `vtec_source` | External VTEC source label, for example `IRI` or `GIM` | string |
+| `stec_slm` | Legacy STEC prediction, `M(elevation) * vtec_baseline` | TECU |
+| `stec_residual_slm` | Legacy residual target, `stec_obs - stec_slm` | TECU |
 
 ## Current Quality Control
 

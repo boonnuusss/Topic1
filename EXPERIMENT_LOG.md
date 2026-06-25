@@ -255,3 +255,131 @@ prediction `stec_slm + predicted residual` against `stec_obs`.
   R2 `0.5858`.
 - These metrics are entry-point smoke tests only because the SLM table used
   diagnostic constant VTEC and random splits.
+
+## 2026-06-24 Experiment 010: Correct Mainline To STEC-to-VTEC Conversion
+
+### Goal
+
+Correct the project objective from standalone STEC prediction to STEC modeling
+for STEC-to-VTEC conversion.
+
+### Changes
+
+- Updated the project brain files so the mainline target is VTEC conversion
+  accuracy rather than direct `stec_obs` prediction.
+- Added `src.slm_vtec` for the current physical baseline:
+  `vtec_slm = stec_obs / slm_mapping_factor`.
+- Added `scripts/build_slm_vtec.ps1` as the reproducible wrapper for the SLM
+  VTEC product.
+- Marked the previously implemented `stec_slm`, direct STEC prediction, and
+  residual-learning entry points as legacy/off-mainline.
+
+### Notes
+
+- The legacy code is retained because it may still be useful for smoke tests or
+  later controlled experiments, but it no longer defines the scientific route.
+- The preferred ML route is now an IRI-backed simulation experiment: train
+  ray-wise STEC models such as RayMLP, then compare ML-assisted conversion and
+  classical SLM conversion in VTEC space.
+
+## 2026-06-25 Experiment 011: Full One-day SLM VTEC Product
+
+### Goal
+
+Run the current mainline single-layer STEC-to-VTEC conversion on the complete
+one-day ray-wise STEC parquet and inspect the resulting `vtec_slm` distribution.
+
+### Command
+
+```powershell
+E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe -m src.slm_vtec --input datasets\processed\raystec_china_20240505.parquet --output datasets\processed\rayvtec_china_20240505_slm.parquet --shell-height-km 450
+```
+
+### Output
+
+- `datasets/processed/rayvtec_china_20240505_slm.parquet`
+- `datasets/processed/rayvtec_china_20240505_slm.metadata.json`
+- `results/tables/vtec_slm_distribution_20240505.csv`
+- `results/tables/vtec_slm_by_elevation_20240505.csv`
+- `results/tables/vtec_slm_by_utc_hour_20240505.csv`
+- `results/tables/vtec_slm_high_value_stations_20240505.csv`
+
+### Observations
+
+- Input rows: `199087`
+- Output rows: `199087`
+- Dropped rows: `0`
+- Missing or non-finite values in `stec_obs`, `elevation`,
+  `slm_mapping_factor`, and `vtec_slm`: `0`
+- `vtec_slm` distribution in TECU:
+  - min `0.0032`
+  - p05 `11.0776`
+  - median `35.7057`
+  - mean `42.9024`
+  - p95 `96.1600`
+  - p99 `121.0263`
+  - max `165.3059`
+- `vtec_slm > 100 TECU`: `8139` rows
+- `vtec_slm > 150 TECU`: `244` rows
+
+### Notes
+
+- High `vtec_slm` values are concentrated mainly during UTC `05-10`, consistent
+  with a time-structured daytime/evening regional signal rather than isolated
+  random failures.
+- The highest values are concentrated in a small set of southern stations,
+  especially `GXGG`, so later VTEC diagnostics should inspect station-level and
+  spatial residual patterns.
+- Because this product is generated from observed slant TEC, possible receiver
+  and satellite bias handling remains an important review item before making
+  scientific claims about absolute VTEC.
+
+## 2026-06-25 Experiment 012: VTEC Diagnostic Plots
+
+### Goal
+
+Create reproducible diagnostic figures for the completed SLM VTEC product:
+spatial map, elevation-bin distribution, station-bin distribution, and time
+evolution.
+
+### Command
+
+```powershell
+E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe -m src.plot_vtec_diagnostics --input datasets\processed\rayvtec_china_20240505_slm.parquet --figure-dir results\figures --table-dir results\tables --date-label 20240505
+```
+
+### Output
+
+- `results/figures/vtec_slm_map_20240505_0800.png`
+- `results/figures/vtec_slm_map_20240505_0800.svg`
+- `results/figures/vtec_slm_elevation_distribution_20240505.png`
+- `results/figures/vtec_slm_elevation_distribution_20240505.svg`
+- `results/figures/vtec_slm_station_distribution_20240505.png`
+- `results/figures/vtec_slm_station_distribution_20240505.svg`
+- `results/figures/vtec_slm_time_evolution_20240505.png`
+- `results/figures/vtec_slm_time_evolution_20240505.svg`
+- `results/tables/vtec_slm_elevation_diagnostic_20240505.csv`
+- `results/tables/vtec_slm_station_diagnostic_20240505.csv`
+- `results/tables/vtec_slm_time_diagnostic_20240505.csv`
+- `results/tables/vtec_slm_diagnostics_20240505.metadata.json`
+
+### Observations
+
+- The plotting input contains `199087` rows, all valid for plotting.
+- The map epoch was selected automatically as `2024-05-05 08:00:00` UTC because
+  it had the highest median `vtec_slm` among data-rich epochs.
+- At the map epoch, sample count was `2052` and the map used the Cartopy
+  backend.
+- The time-evolution diagnostic peaks near UTC `08:00`, with median
+  `vtec_slm` about `71.04 TECU`.
+- The elevation-bin diagnostic shows broadly similar medians from `10-60 deg`,
+  with the `45-60 deg` bin having the highest median among the configured bins.
+- The station diagnostic highlights `GXGG` as a high-VTEC station; station-level
+  interpretation should use sample-count thresholds because some stations have
+  very few rows.
+
+### Validation
+
+- `python -m py_compile src\plot_vtec_diagnostics.py` passed.
+- All four PNG files were visually checked for nonblank content, reasonable map
+  framing, and readable labels.
