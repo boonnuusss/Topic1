@@ -53,6 +53,8 @@ New coding agents should read these files before making changes:
 - `AGENT.md`: long-term rules for scientific coding agents.
 - `RESEARCH_PLAN.md`: scientific question, hypotheses, datasets, and risks.
 - `DATA_DICTIONARY.md`: processed table schema, units, and provenance.
+- `IRI_SIMULATION_SCHEMA.md`: IRI-backed simulation targets, integration
+  assumptions, SLM comparison columns, and metadata contract.
 - `TODO.md`: current milestone and executable task list.
 - `EXPERIMENT_LOG.md`: reproducibility log for data builds and figures.
 - `FAILED_ATTEMPTS.md`: known pitfalls and fixes.
@@ -162,6 +164,26 @@ The next mainline step is to build an IRI-backed simulation experiment:
 3. Apply the SLM conversion baseline to estimate VTEC from STEC.
 4. Train RayMLP-style STEC models under the same simulation setup.
 5. Compare SLM and ML-assisted conversion errors against the IRI reference VTEC.
+
+The detailed schema and metadata contract are defined in
+`IRI_SIMULATION_SCHEMA.md`. It is based on the existing notebooks under
+`../00_iri/mycode/ML_sTEC/`, especially `generate_sTEC_obs_iri_regional.ipynb`
+and `gen_iri_val_dataset.ipynb`, but uses explicit row-wise parquet columns
+instead of legacy npz field names.
+
+The simulation builder entry point is:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.iri_simulation_builder `
+  --input datasets/processed/raystec_china_20240505.parquet `
+  --output datasets/interim/iri_simulation_smoke.parquet `
+  --max-rows 3 `
+  --max-epochs 1 `
+  --ray-sample-spacing-km 50
+```
+
+Start with small smoke tests. Full-day high-resolution ray integration can be
+expensive, so the builder includes a per-epoch IRI query-point safety limit.
 
 ## Reproducibility Rules
 

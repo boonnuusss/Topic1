@@ -25,6 +25,7 @@ single-layer STEC-to-VTEC conversion baseline.
 - Orbit data: `../00_iri/mycode/ML_sTEC/Mydata/WUM2024(126)0505.nc`
 - Builder: `python -m src.dataset_builder --config configs/quick_test.yaml`
 - SLM VTEC conversion: `python -m src.slm_vtec`
+- IRI simulation builder: `python -m src.iri_simulation_builder`
 
 ## Core Columns
 
@@ -103,17 +104,48 @@ The current mainline formula is:
 VTEC_slm = STEC_obs / M(elevation)
 ```
 
-## Future IRI Simulation Columns
+## IRI Simulation Columns
 
-Names may be refined when the IRI simulation builder is implemented, but the
-intended meanings are:
+The detailed design is in `IRI_SIMULATION_SCHEMA.md`. The intended processed
+simulation file is:
+
+```text
+datasets/processed/iri_simulation_rayvtec_YYYYMMDD.parquet
+```
+
+Each row remains one receiver-satellite ray at one UTC epoch. The IRI-backed
+simulation adds controlled reference targets and SLM conversion diagnostics.
 
 | Column | Meaning | Unit / Type |
 | --- | --- | --- |
-| `vtec_ref_iri` | Reference VTEC generated from IRI background ionosphere | TECU |
-| `stec_sim_iri` | Simulated ray-wise STEC derived from the IRI background | TECU |
-| `iri_model_version` | IRI/PyIRI version or configuration label | string |
-| `iri_assumption_notes` | Compact label for simulation assumptions | string |
+| `source_row_id` | Original row number in the input ray-wise parquet | integer |
+| `simulation_id` | Stable label for the IRI simulation run | string |
+| `stec_iri_ray` | Full receiver-satellite ray integral through the IRI electron-density field | TECU |
+| `vtec_iri_ref` | Reference VTEC at IPP lon/lat from IRI vertical integration | TECU |
+| `vtec_iri_ref_method` | Method label, initially `vertical_ipp_trapezoid` | string |
+| `stec_iri_method` | Method label, initially `ecef_ray_integral` | string |
+| `slm_shell_height_km` | Thin-shell height used for SLM conversion | km |
+| `slm_mapping_factor_iri` | Mapping factor computed from `elevation` and `slm_shell_height_km` | unitless |
+| `vtec_slm_from_iri_stec` | SLM conversion of simulated observable STEC, `stec_iri_observable / slm_mapping_factor_iri` | TECU |
+| `vtec_slm_error_iri` | SLM VTEC error, `vtec_slm_from_iri_stec - vtec_iri_ref` | TECU |
+| `vtec_slm_abs_error_iri` | Absolute SLM VTEC error | TECU |
+| `ray_integral_n_samples` | Number of samples used along the receiver-satellite ray | integer |
+| `ray_integral_min_alt_km` | Minimum sampled ray altitude | km |
+| `ray_integral_max_alt_km` | Maximum sampled ray altitude | km |
+| `ray_integral_path_length_km` | Full sampled ray path length | km |
+| `ray_integral_outside_grid_fraction` | Fraction of ray samples outside the IRI grid | unitless |
+| `bias_mode` | Bias/noise mode, initially `none` | string |
+| `receiver_bias_tecu` | Simulated receiver bias, initially `0` | TECU |
+| `satellite_bias_tecu` | Simulated satellite bias, initially `0` | TECU |
+| `noise_tecu` | Simulated random noise, initially `0` | TECU |
+| `stec_iri_observable` | Simulated observable STEC after optional bias/noise | TECU |
+
+For the first no-bias simulation:
+
+```text
+stec_iri_observable = stec_iri_ray
+vtec_slm_from_iri_stec = stec_iri_observable / slm_mapping_factor_iri
+```
 
 ## Legacy Off-mainline Columns
 

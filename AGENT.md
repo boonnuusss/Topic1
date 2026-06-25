@@ -35,9 +35,10 @@ Before editing or running experiments, read:
 
 1. `RESEARCH_PLAN.md`
 2. `DATA_DICTIONARY.md`
-3. `TODO.md`
-4. `EXPERIMENT_LOG.md`
-5. `FAILED_ATTEMPTS.md`
+3. `IRI_SIMULATION_SCHEMA.md`
+4. `TODO.md`
+5. `EXPERIMENT_LOG.md`
+6. `FAILED_ATTEMPTS.md`
 
 ## Important Rules
 

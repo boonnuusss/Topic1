@@ -383,3 +383,156 @@ E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe -m src.
 - `python -m py_compile src\plot_vtec_diagnostics.py` passed.
 - All four PNG files were visually checked for nonblank content, reasonable map
   framing, and readable labels.
+
+## 2026-06-25 Experiment 013: IRI Simulation Schema Design
+
+### Goal
+
+Design the IRI-backed simulation schema for controlled STEC-to-VTEC conversion
+experiments.
+
+### Reference Material
+
+- `../00_iri/mycode/ML_sTEC/generate_sTEC_obs_regional.ipynb`
+- `../00_iri/mycode/ML_sTEC/generate_sTEC_obs_iri_regional.ipynb`
+- `../00_iri/mycode/ML_sTEC/gen_iri_val_dataset.ipynb`
+- `../00_iri/mycode/ML_sTEC/generate_raypath.ipynb`
+- `../00_iri/mycode/ML_sTEC/Read_sp3_XYZ.py`
+- Existing npz files under `../00_iri/mycode/ML_sTEC/Mydata/`
+
+### Changes
+
+- Added `IRI_SIMULATION_SCHEMA.md`.
+- Updated `README.md`, `AGENT.md`, `RESEARCH_PLAN.md`, `DATA_DICTIONARY.md`,
+  and `TODO.md` to point to the schema and use the new IRI column names.
+
+### Design Decisions
+
+- Use row-wise parquet as the main simulation product, not the legacy npz layout.
+- Use `stec_iri_ray` for the full receiver-satellite IRI ray integral.
+- Use `vtec_iri_ref` for the IPP vertical IRI reference.
+- Use `vtec_slm_from_iri_stec = stec_iri_observable / slm_mapping_factor_iri`
+  for the classical SLM conversion baseline in the simulation. In the first
+  no-bias run, `stec_iri_observable` equals `stec_iri_ray`.
+- Keep `slm_shell_height_km = 450` as the first default, but record it in every
+  output and metadata file.
+- Start with `bias_mode = none`; receiver/satellite bias and noise are optional
+  later extensions.
+
+### Notes
+
+- Existing `iri_vTEC_*.npz` files store VTEC in a variable named `slantTEC` and
+  use `(3, N)` coordinate arrays, while obs/IRI STEC npz files use `(N, 3)`.
+  The new schema explicitly avoids both ambiguities.
+- Existing notebook integration uses PyIRI electron density, regular-grid
+  interpolation, ECEF straight-line ray sampling, and trapezoidal integration.
+  The first builder should reproduce this logic on a small subset before
+  running the full one-day table.
+
+## 2026-06-25 Experiment 014: IRI Simulation Builder Entry Point
+
+### Goal
+
+Implement a reproducible command-line builder for the IRI-backed simulation
+table defined in `IRI_SIMULATION_SCHEMA.md`.
+
+### Changes
+
+- Added `src.iri_simulation_builder`.
+- Added `scripts/build_iri_simulation.ps1`.
+- Added `fortranformat` to `requirements.txt` because vendored PyIRI requires
+  it.
+- Updated README, script docs, TODO, data dictionary, and schema notes.
+
+### Implementation Notes
+
+- The builder starts from the Topic1 row-wise STEC parquet.
+- For each epoch, it calls vendored PyIRI using a `row_adaptive_point_profiles`
+  strategy:
+  - row IPP points are used for `vtec_iri_ref`;
+  - in-grid receiver-satellite ray sample points are used for `stec_iri_ray`;
+  - electron density outside the configured IRI altitude/region is treated as
+    zero.
+- It writes `stec_iri_ray`, `vtec_iri_ref`,
+  `vtec_slm_from_iri_stec`, `vtec_slm_error_iri`, integration diagnostics, and
+  metadata.
+- A per-epoch PyIRI query-point safety limit prevents accidental large
+  high-resolution full-day runs.
+
+### Validation
+
+- `python -m py_compile src\iri_simulation_builder.py` passed.
+- `python -m src.iri_simulation_builder --help` passed.
+- `scripts/build_iri_simulation.ps1` parsed as a valid PowerShell script.
+- First smoke test failed before builder execution because the environment
+  lacked PyIRI dependency `fortranformat`.
+- Installed `fortranformat==2.0.3` into the Topic1 `.venv`.
+- One-row smoke test passed:
+  - output rows: `1`
+  - epoch: `2024-05-05 00:00:00`
+  - IRI horizontal points: `255`
+  - `stec_iri_ray`: `75.0271 TECU`
+  - `vtec_iri_ref`: `42.8345 TECU`
+  - `vtec_slm_error_iri`: `1.5375 TECU`
+- Three-row smoke test passed:
+  - output rows: `3`
+  - IRI horizontal points: `372`
+  - non-finite values in key IRI/VTEC columns: `0`
+
+### Outputs
+
+- `datasets/interim/iri_simulation_smoke_1row.parquet`
+- `datasets/interim/iri_simulation_smoke_1row.metadata.json`
+- `datasets/interim/iri_simulation_smoke_3row.parquet`
+- `datasets/interim/iri_simulation_smoke_3row.metadata.json`
+
+## 2026-06-25 Experiment 015: UT05:00 IRI Simulation Spacing Test
+
+### Goal
+
+Run the `2024-05-05 05:00:00 UTC` epoch with dense `2.5 km` ray sampling and
+summarize `vtec_slm_error_iri` by elevation bin.
+
+### Changes
+
+- Added `regular_grid_interpolator` as an optional IRI grid strategy in
+  `src.iri_simulation_builder`.
+- Updated `scripts/build_iri_simulation.ps1` to expose `GridStrategy` and
+  `ProgressEvery`.
+- Documented the dense-spacing strategy in `IRI_SIMULATION_SCHEMA.md`.
+
+### Run
+
+```powershell
+python -m src.iri_simulation_builder `
+  --input datasets/interim/raystec_china_20240505_0500.parquet `
+  --output datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --metadata-output datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular.metadata.json `
+  --simulation-id iri_rayvtec_20240505_0500_spacing2p5_regular `
+  --grid-strategy regular_grid_interpolator `
+  --ray-sample-spacing-km 2.5 `
+  --max-iri-points-per-epoch 50000 `
+  --progress-every 200 `
+  --drop-invalid-geometry
+```
+
+### Results
+
+- Rows: `2041`.
+- IRI grid: `[383 altitude, 101 longitude, 201 latitude]`.
+- Ray sample points: `24283856`.
+- Inside-grid ray samples: `5588464`.
+- Overall `vtec_slm_error_iri`:
+  - mean: `1.0612 TECU`
+  - median: `0.4060 TECU`
+  - MAE: `1.4254 TECU`
+
+Elevation-bin summary is saved to:
+
+```text
+datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular_elevation_bins.csv
+```
+
+Low-elevation rays remain the largest error source. The `[10,20)` bin has mean
+bias `5.1544 TECU` and MAE `5.1910 TECU`; bins above `50` degrees have MAE below
+`0.65 TECU` in this test.

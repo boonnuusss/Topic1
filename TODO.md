@@ -23,9 +23,9 @@ IRI-backed simulation experiment for ML-assisted conversion.
   `vtec_slm` distribution.
 - [x] Add VTEC diagnostic plots: map of `vtec_slm`, elevation-bin distribution,
   station-bin distribution, and time evolution.
-- [ ] Design the IRI-backed simulation schema: reference VTEC, simulated STEC,
+- [x] Design the IRI-backed simulation schema: reference VTEC, simulated STEC,
   shell height, integration assumptions, and metadata.
-- [ ] Implement the IRI simulation dataset builder.
+- [x] Implement the IRI simulation dataset builder.
 - [ ] Define VTEC-space metrics for SLM versus ML-assisted conversion.
 - [ ] Adapt RayMLP training to the simulation setting.
 - [ ] Compare SLM conversion and RayMLP-assisted conversion under random, time,
@@ -51,8 +51,9 @@ preserved for reference but are not the current mainline:
 
 ## Highest Priority Next
 
-Design the IRI-backed simulation schema: define reference VTEC, simulated STEC,
-shell height, integration assumptions, bias assumptions, and metadata fields.
+Define VTEC-space metrics for SLM versus ML-assisted conversion. Start with
+metrics on the IRI simulation smoke output, then scale after the simulation
+builder settings are finalized.
 
 ## Blocked / Needs User Decision
 

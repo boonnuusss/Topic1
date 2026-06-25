@@ -4,6 +4,7 @@ numpy>=1.26,<2.3
 scipy
 matplotlib
 cartopy
+fortranformat
 xarray
 netCDF4
 pyproj

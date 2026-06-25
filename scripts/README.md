@@ -68,6 +68,36 @@ This creates map, elevation-bin, station-bin, and time-evolution diagnostics for
 `vtec_slm`. If `-MapTime` is omitted, the map uses the data-rich epoch with the
 highest median `vtec_slm`.
 
+## IRI Simulation Builder
+
+Start with a small smoke test:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\build_iri_simulation.ps1 `
+  -OutputPath datasets\interim\iri_simulation_smoke_3row.parquet `
+  -MaxRows 3 `
+  -MaxEpochs 1 `
+  -RaySampleSpacingKm 50
+```
+
+Equivalent Python command:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.iri_simulation_builder `
+  --input datasets\processed\raystec_china_20240505.parquet `
+  --output datasets\interim\iri_simulation_smoke_3row.parquet `
+  --simulation-id iri_rayvtec_20240505_smoke_3row `
+  --max-rows 3 `
+  --max-epochs 1 `
+  --ray-sample-spacing-km 50
+```
+
+The builder writes `stec_iri_ray`, `vtec_iri_ref`,
+`vtec_slm_from_iri_stec`, and VTEC-space SLM error columns. It calls the
+vendored PyIRI package under `../00_iri/PyIRI` and records all IRI/grid/ray
+integration settings in metadata.
+
 ## Legacy Off-mainline SLM STEC Baseline
 
 The older wrapper below predicts STEC from an external VTEC source:
