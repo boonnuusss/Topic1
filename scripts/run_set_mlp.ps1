@@ -31,7 +31,7 @@ Write-Host "  Spatial sigma     : $SpatialSigmaKm km"
 Write-Host "  Epochs            : $Epochs"
 Write-Host "  Batch size        : $BatchSize"
 Write-Host ""
-Write-Host "Expected: ~1622 training examples, each with $MaxObs nearby observations."
+Write-Host "Expected: ~1584 training examples, each with ~20 nearby observations."
 Write-Host "Architecture: QueryEncoder + ObsEncoder + SpatialCrossAttention + OutputMLP"
 Write-Host ""
 
@@ -56,7 +56,7 @@ Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Comparison baselines:" -ForegroundColor Yellow
 Write-Host "  SLM:                         VTEC RMSE 2.44, R2 0.961"
-Write-Host "  RayMLP nearby-200·50ep:      VTEC RMSE 2.59, R2 0.956"
-Write-Host "  RayMLP identity-only:        VTEC RMSE 24.08, R2 -2.80"
+Write-Host "  set-to-query nearby200-s100-100ep: VTEC RMSE 2.40, R2 0.962"
+Write-Host "  RayMLP nearby-200路50ep:      VTEC RMSE 2.59, R2 0.956"
 
 Pop-Location

@@ -8,11 +8,6 @@ $IRIInput = Join-Path $ProjectDir "datasets\interim\iri_simulation_20240505_0500
 
 Push-Location $ProjectDir
 
-# Three tuning experiments on set-to-query model:
-#   1. nearby-400, sigma-200, 100ep  — wider observation radius
-#   2. nearby-200, sigma-200, 100ep  — larger spatial sigma only
-#   3. nearby-200, sigma-100, 100ep  — more epochs baseline
-
 $experiments = @(
     @{Name="set_mlp_0500_nearby400_s200_e100"; Km=400; Sigma=200; Ep=100},
     @{Name="set_mlp_0500_nearby200_s200_e100"; Km=200; Sigma=200; Ep=100},
@@ -42,6 +37,6 @@ foreach ($exp in $experiments) {
 }
 
 Write-Host "============================================" -ForegroundColor Green
-Write-Host "All 3 set-to-query tuning experiments complete." -ForegroundColor Green
+Write-Host "All 3 set-to-query experiments complete." -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
 Pop-Location

@@ -69,8 +69,6 @@ except ImportError:
 
 DEFAULT_INPUT = "datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular.parquet"
 
-# ── column definitions ───────────────────────────────────────────────────
-
 QUERY_GEOM_COLS = [
     "rec_lon", "rec_lat", "rec_h",
     "sat_lon", "sat_lat", "sat_h",
@@ -79,21 +77,17 @@ QUERY_GEOM_COLS = [
     "slant_factor", "ray_length",
     "los_x", "los_y", "los_z",
 ]
-OBS_GEOM_COLS = QUERY_GEOM_COLS  # same 16 columns
 CONSTELLATION_COLS = [
     "constellation_gps", "constellation_glonass",
     "constellation_galileo", "constellation_bds",
     "constellation_sbas", "constellation_qzss",
 ]
 TIME_COLS = ["hour_sin", "hour_cos", "doy_sin", "doy_cos"]
-OBS_GEO_CONST_COLS = OBS_GEOM_COLS + CONSTELLATION_COLS
-# "source_stec" is appended dynamically from args.source_stec_column
-
-# ── utilities ────────────────────────────────────────────────────────────
+OBS_GEO_CONST_COLS = QUERY_GEOM_COLS + CONSTELLATION_COLS
+# "source_stec" appended dynamically from args
 
 
 def _haversine_km(lon1, lat1, lon2, lat2):
-    """Vectorized great-circle distance in km (all degrees → km)."""
     R = 6371.0
     dlon = np.radians(lon2 - lon1)
     dlat = np.radians(lat2 - lat1)
@@ -103,16 +97,12 @@ def _haversine_km(lon1, lat1, lon2, lat2):
     return R * 2 * np.arctan2(np.sqrt(np.maximum(a, 0)), np.sqrt(np.maximum(1 - a, 1e-15)))
 
 
-def _ensure_constellation(df: pd.DataFrame) -> pd.DataFrame:
+def _ensure_constellation(df):
     out = df.copy()
     for col in CONSTELLATION_COLS:
         if col not in out.columns:
             out[col] = 0
     return out
-
-
-def _time_features(df: pd.DataFrame) -> np.ndarray:
-    return df[TIME_COLS].to_numpy(dtype=np.float64)
 
 
 # ── set-example construction ─────────────────────────────────────────────
@@ -126,24 +116,11 @@ def build_set_examples(
     max_obs: int = 40,
     ipp_radius_km: float = 200.0,
     rng: np.random.Generator | None = None,
-    time_arr: np.ndarray | None = None,
     obs_cols: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Any]:
     """Build leave-one-out set examples for one epoch.
 
-    For each row *i* in *df*:
-      - query  = target geometry of row *i*
-      - obs    = all rows *j ≠ i* within *ipp_radius_km* of *i*
-      - label  = row *i*'s slant STEC
-
-    Returns
-    -------
-    query_geom    (N, 16)  float64
-    obs_features  (N, max_obs, n_obs_cols)  float64, zero-padded
-    obs_mask      (N, max_obs)  bool, True=valid
-    obs_dists     (N, max_obs)  float64, IPP distance km
-    labels        (N,)  float64
-    extra         dict with debug info
+    Each row i: query = target geometry, obs = nearby rays j≠i, label = absolute STEC.
     """
     if obs_cols is None:
         obs_cols = OBS_GEO_CONST_COLS + [source_stec_col]
@@ -155,29 +132,20 @@ def build_set_examples(
     o_feat = df[obs_cols].to_numpy(dtype=np.float64)
     stec = df[target_stec_col].to_numpy(dtype=np.float64)
 
-    if time_arr is None:
-        time_arr = _time_features(df)
+    QG = np.zeros((n, len(QUERY_GEOM_COLS)), dtype=np.float64)
+    OF = np.zeros((n, max_obs, n_obs_cols), dtype=np.float64)
+    OM = np.zeros((n, max_obs), dtype=bool)
+    OD = np.zeros((n, max_obs), dtype=np.float64) + np.inf
+    Y  = np.zeros(n, dtype=np.float64)
+    n_neighbors = np.zeros(n, dtype=int)
 
-    Nq = n
-    QG = np.zeros((Nq, len(QUERY_GEOM_COLS)), dtype=np.float64)
-    OF = np.zeros((Nq, max_obs, n_obs_cols), dtype=np.float64)
-    OM = np.zeros((Nq, max_obs), dtype=bool)
-    OD = np.zeros((Nq, max_obs), dtype=np.float64) + np.inf
-    Y  = np.zeros(Nq, dtype=np.float64)
-
-    n_neighbors = np.zeros(Nq, dtype=int)
     for i in range(n):
         dists = _haversine_km(ipp_lon[i], ipp_lat[i], ipp_lon, ipp_lat)
-        dists[i] = np.inf  # exclude self
+        dists[i] = np.inf
         candidates = np.where(dists <= ipp_radius_km)[0]
-
         if len(candidates) > max_obs:
-            # subsample nearest
             order = np.argsort(dists[candidates])
             candidates = candidates[order[:max_obs]]
-        elif len(candidates) > max_obs:
-            candidates = candidates[:max_obs]
-
         k = len(candidates)
         n_neighbors[i] = k
         QG[i] = q_geom[i]
@@ -192,89 +160,29 @@ def build_set_examples(
         "mean_neighbors": float(np.mean(n_neighbors[valid])),
         "min_neighbors": int(np.min(n_neighbors[valid])),
         "max_neighbors": int(np.max(n_neighbors[valid])),
-        "n_total": int(Nq),
+        "n_total": int(n),
         "n_valid": int(valid.sum()),
     }
     QG, OF, OM, OD, Y = QG[valid], OF[valid], OM[valid], OD[valid], Y[valid]
     return QG, OF, OM, OD, Y, extra
 
 
-def build_vertical_set_queries(
-    df: pd.DataFrame,
-    *,
-    vertical_top_km: float = 2000.0,
-    max_neighbors: int = 80,
-    obs_cols: list[str] | None = None,
-    source_stec_col: str = "stec_iri_observable",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build vertical query rays with full training-set observation context.
-
-    Each query is a vertical ray at an IPP.  The observation set is ALL
-    non-query training rays within the search radius.
-    """
-    if obs_cols is None:
-        obs_cols = OBS_GEO_CONST_COLS + [source_stec_col]
-    n = len(df)
-    n_obs_cols = len(obs_cols)
-    ipp_lon = df["ipp_lon"].to_numpy(dtype=np.float64)
-    ipp_lat = df["ipp_lat"].to_numpy(dtype=np.float64)
-    o_feat = df[obs_cols].to_numpy(dtype=np.float64)
-
-    vert_tgt = build_vertical_target_geometry(df, vertical_top_km=vertical_top_km)
-    q_geom = vert_tgt[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
-
-    # Use IPP radius to find nearby train rays for each test IPP
-    QG = q_geom.astype(np.float64)
-    OF = np.zeros((n, max_neighbors, n_obs_cols), dtype=np.float64)
-    OM = np.zeros((n, max_neighbors), dtype=bool)
-    OD = np.zeros((n, max_neighbors), dtype=np.float64) + np.inf
-
-    for i in range(n):
-        dists = _haversine_km(ipp_lon[i], ipp_lat[i], ipp_lon, ipp_lat)
-        dists[i] = np.inf
-        candidates = np.where(dists <= 400.0)[0]  # wider radius for test
-        if len(candidates) > max_neighbors:
-            order = np.argsort(dists[candidates])
-            candidates = candidates[order[:max_neighbors]]
-        k = len(candidates)
-        if k > 0:
-            OF[i, :k] = o_feat[candidates]
-            OM[i, :k] = True
-            OD[i, :k] = dists[candidates]
-
-    return QG, OF, OM, OD
-
-
-# ── training ─────────────────────────────────────────────────────────────
+# ── training utilities ────────────────────────────────────────────────────
 
 
 import torch
-from torch.utils.data import Dataset, DataLoader, TensorDataset
+from torch.utils.data import Dataset, DataLoader
 
 
 class _SetDataset(Dataset):
-    """Torch Dataset for set-to-query batches."""
-
-    def __init__(
-        self,
-        q_geom: np.ndarray,     # (N, 16)
-        obs_feat: np.ndarray,   # (N, K, 23)
-        obs_mask: np.ndarray,   # (N, K)
-        obs_dists: np.ndarray,  # (N, K)
-        labels: np.ndarray,     # (N,)
-    ):
-        super().__init__()
+    def __init__(self, q_geom, obs_feat, obs_mask, obs_dists, labels):
         self._q = q_geom.copy()
         self._o = obs_feat.copy()
         self._m = obs_mask.copy()
         self._d = obs_dists.copy()
         self._y = labels.copy()
-
-    def __len__(self):
-        return len(self._q)
-
-    def __getitem__(self, idx):
-        return (self._q[idx], self._o[idx], self._m[idx], self._d[idx], self._y[idx])
+    def __len__(self): return len(self._q)
+    def __getitem__(self, idx): return (self._q[idx], self._o[idx], self._m[idx], self._d[idx], self._y[idx])
 
 
 def _collate(batch):
@@ -288,30 +196,13 @@ def _collate(batch):
     )
 
 
-def _make_loader(dataset, batch_size: int, seed: int, shuffle: bool = True):
-    from torch.utils.data import DataLoader
-
+def _make_loader(ds, batch_size, seed, shuffle=True):
     g = torch.Generator()
     g.manual_seed(seed)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        drop_last=False,
-        collate_fn=_collate,
-        generator=g,
-    )
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=False, collate_fn=_collate, generator=g)
 
 
-def _predict_set(
-    model, device,
-    q_geom: np.ndarray,       # (M, 16)
-    obs_feat: np.ndarray,     # (M, K, 23)
-    obs_mask: np.ndarray,     # (M, K)
-    obs_dists: np.ndarray,    # (M, K)
-    batch_size: int = 512,
-) -> np.ndarray:
-    """Predict STEC for M queries, chunked by batch_size."""
+def _predict_set(model, device, q_geom, obs_feat, obs_mask, obs_dists, batch_size=512):
     preds = []
     model.eval()
     for start in range(0, len(q_geom), batch_size):
@@ -352,7 +243,6 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
 
     train_df, test_df, split_metadata = choose_simulation_split(df, args)
 
-    # ── build training set examples ──────────────────────────────────
     rng = np.random.default_rng(args.seed)
     QG, OF, OM, OD, Y, set_extra = build_set_examples(
         train_df,
@@ -366,12 +256,9 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
     if len(Y) < 2:
         raise ValueError("Set training requires at least 2 valid examples.")
 
-    # ── standardize features ─────────────────────────────────────────
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import StandardScaler
 
-    n_train = len(QG)
-    # Flatten obs to fit imputer/scaler on all valid feature values
     obs_flat = OF.reshape(-1, OF.shape[-1])
     valid_rows = OM.ravel()
     obs_valid = obs_flat[valid_rows]
@@ -387,21 +274,19 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
 
     o_imp.fit(obs_valid)
     o_scaler.fit(o_imp.transform(obs_valid))
-    # Transform each row's valid obs
     OF_imp = np.zeros_like(OF)
     for i in range(len(OF)):
-        n_valid = int(OM[i].sum())
-        if n_valid > 0:
-            OF_imp[i, :n_valid] = o_imp.transform(OF[i, :n_valid])
+        nv = int(OM[i].sum())
+        if nv > 0:
+            OF_imp[i, :nv] = o_imp.transform(OF[i, :nv])
     OF_scaled = np.zeros_like(OF)
     for i in range(len(OF)):
-        n_valid = int(OM[i].sum())
-        if n_valid > 0:
-            OF_scaled[i, :n_valid] = o_scaler.transform(OF_imp[i, :n_valid])
+        nv = int(OM[i].sum())
+        if nv > 0:
+            OF_scaled[i, :nv] = o_scaler.transform(OF_imp[i, :nv])
 
     Y_scaled = y_scaler.fit_transform(Y.reshape(-1, 1)).ravel().astype(np.float64)
 
-    # ── training ─────────────────────────────────────────────────────
     device = choose_device(args.device)
     train_ds = _SetDataset(QG_scaled, OF_scaled, OM, OD, Y_scaled)
     loader = _make_loader(train_ds, args.batch_size, args.seed, shuffle=True)
@@ -414,8 +299,7 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
     model.to(device)
 
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.learning_rate,
-        weight_decay=args.weight_decay,
+        model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
     )
     criterion = torch.nn.MSELoss()
 
@@ -438,41 +322,27 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
             bs = len(qg)
             total_loss += float(loss.detach().cpu()) * bs
             total_count += bs
-        history.append({
-            "epoch": epoch,
-            "train_loss": total_loss / max(total_count, 1),
-        })
+        history.append({"epoch": epoch, "train_loss": total_loss / max(total_count, 1)})
 
-    # ── train metrics ────────────────────────────────────────────────
-    train_pred_scaled = _predict_set(
-        model, device, QG_scaled, OF_scaled, OM, OD,
-        batch_size=args.batch_size,
-    )
-    train_pred = y_scaler.inverse_transform(
-        train_pred_scaled.reshape(-1, 1)
-    ).ravel()
+    train_pred_scaled = _predict_set(model, device, QG_scaled, OF_scaled, OM, OD, batch_size=args.batch_size)
+    train_pred = y_scaler.inverse_transform(train_pred_scaled.reshape(-1, 1)).ravel()
     train_stec_metrics = regression_metrics(Y, train_pred)
 
-    # ── test set predictions ─────────────────────────────────────────
-    # Slant query (identity-like: model predicts each test ray's STEC
-    # using the training rays as context)
+    # ── test predictions ─────────────────────────────────────────────
     train_obs_feat = train_df[obs_feature_cols].to_numpy(dtype=np.float64)
     train_ipp_lon = train_df["ipp_lon"].to_numpy(dtype=np.float64)
     train_ipp_lat = train_df["ipp_lat"].to_numpy(dtype=np.float64)
-
     test_slant_geom = test_df[QUERY_GEOM_COLS].to_numpy(dtype=np.float64)
     test_ipp_lon = test_df["ipp_lon"].to_numpy(dtype=np.float64)
     test_ipp_lat = test_df["ipp_lat"].to_numpy(dtype=np.float64)
     n_test = len(test_df)
 
-    # For each test ray, find nearby training rays as obs context
     test_OF = np.zeros((n_test, args.max_obs, n_obs_cols), dtype=np.float64)
     test_OM = np.zeros((n_test, args.max_obs), dtype=bool)
     test_OD = np.zeros((n_test, args.max_obs), dtype=np.float64) + np.inf
     for i in range(n_test):
-        dists = _haversine_km(test_ipp_lon[i], test_ipp_lat[i],
-                              train_ipp_lon, train_ipp_lat)
-        candidates = np.where(dists <= args.nearby_km if args.nearby_km > 0 else 200.0)[0]
+        dists = _haversine_km(test_ipp_lon[i], test_ipp_lat[i], train_ipp_lon, train_ipp_lat)
+        candidates = np.where(dists <= (args.nearby_km if args.nearby_km > 0 else 200.0))[0]
         if len(candidates) > args.max_obs:
             order = np.argsort(dists[candidates])
             candidates = candidates[order[:args.max_obs]]
@@ -482,7 +352,6 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
             test_OM[i, :k] = True
             test_OD[i, :k] = dists[candidates]
 
-    # Apply same scaling
     test_OG_imp = q_imp.transform(test_slant_geom)
     test_OG_scaled = q_scaler.transform(test_OG_imp).astype(np.float64)
     test_OF_imp = np.zeros_like(test_OF)
@@ -496,25 +365,17 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
         if nv > 0:
             test_OF_scaled[i, :nv] = o_scaler.transform(test_OF_imp[i, :nv])
 
-    slant_pred_scaled = _predict_set(
-        model, device, test_OG_scaled, test_OF_scaled, test_OM, test_OD,
-        batch_size=args.batch_size,
-    )
-    slant_pred = y_scaler.inverse_transform(
-        slant_pred_scaled.reshape(-1, 1)
-    ).ravel()
+    slant_pred_scaled = _predict_set(model, device, test_OG_scaled, test_OF_scaled, test_OM, test_OD, batch_size=args.batch_size)
+    slant_pred = y_scaler.inverse_transform(slant_pred_scaled.reshape(-1, 1)).ravel()
 
-    # Vertical query for test IPPs
-    test_vert_geom = build_vertical_target_geometry(
-        test_df, vertical_top_km=args.vertical_top_km,
-    )[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
+    # Vertical query
+    test_vert_geom = build_vertical_target_geometry(test_df, vertical_top_km=args.vertical_top_km)[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
     tv_n = len(test_df)
     tv_OF = np.zeros((tv_n, args.max_obs, n_obs_cols), dtype=np.float64)
     tv_OM = np.zeros((tv_n, args.max_obs), dtype=bool)
     tv_OD = np.zeros((tv_n, args.max_obs), dtype=np.float64) + np.inf
     for i in range(tv_n):
-        dists = _haversine_km(test_ipp_lon[i], test_ipp_lat[i],
-                              train_ipp_lon, train_ipp_lat)
+        dists = _haversine_km(test_ipp_lon[i], test_ipp_lat[i], train_ipp_lon, train_ipp_lat)
         candidates = np.where(dists <= (args.nearby_km if args.nearby_km > 0 else 200.0))[0]
         if len(candidates) > args.max_obs:
             order = np.argsort(dists[candidates])
@@ -538,75 +399,43 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
         if nv > 0:
             tv_OF_scaled[i, :nv] = o_scaler.transform(tv_OF_imp[i, :nv])
 
-    vtec_pred_scaled = _predict_set(
-        model, device, tv_OG_scaled, tv_OF_scaled, tv_OM, tv_OD,
-        batch_size=args.batch_size,
-    )
-    vtec_pred = y_scaler.inverse_transform(
-        vtec_pred_scaled.reshape(-1, 1)
-    ).ravel()
+    vtec_pred_scaled = _predict_set(model, device, tv_OG_scaled, tv_OF_scaled, tv_OM, tv_OD, batch_size=args.batch_size)
+    vtec_pred = y_scaler.inverse_transform(vtec_pred_scaled.reshape(-1, 1)).ravel()
 
     # clamp
     slant_pred = np.maximum(slant_pred, 0.0)
     vtec_pred = np.maximum(vtec_pred, 0.0)
 
-    # ── build predictions table ──────────────────────────────────────
+    # ── predictions table ────────────────────────────────────────────
     predictions = test_df.copy()
     predictions["stec_set_mlp"] = slant_pred
     predictions["vtec_set_mlp_direct"] = vtec_pred
     denom = predictions["stec_set_mlp"].to_numpy(float)
     with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.divide(
-            vtec_pred, denom,
-            out=np.full(len(predictions), np.nan, dtype=float),
-            where=np.abs(denom) > 1e-12,
-        )
+        ratio = np.divide(vtec_pred, denom, out=np.full(len(predictions), np.nan, dtype=float), where=np.abs(denom) > 1e-12)
     predictions["set_mlp_conversion_ratio"] = ratio
-    predictions["vtec_set_mlp"] = (
-        predictions[args.source_stec_column].to_numpy(float) * ratio
-    )
-    predictions["vtec_set_mlp_error_iri"] = (
-        predictions["vtec_set_mlp"] - predictions[args.vtec_target_column]
-    )
-    predictions["vtec_set_mlp_abs_error_iri"] = predictions[
-        "vtec_set_mlp_error_iri"
-    ].abs()
-    predictions["vtec_set_mlp_direct_error_iri"] = (
-        predictions["vtec_set_mlp_direct"] - predictions[args.vtec_target_column]
-    )
-    predictions["vtec_set_mlp_direct_abs_error_iri"] = predictions[
-        "vtec_set_mlp_direct_error_iri"
-    ].abs()
+    predictions["vtec_set_mlp"] = predictions[args.source_stec_column].to_numpy(float) * ratio
+    predictions["vtec_set_mlp_error_iri"] = predictions["vtec_set_mlp"] - predictions[args.vtec_target_column]
+    predictions["vtec_set_mlp_abs_error_iri"] = predictions["vtec_set_mlp_error_iri"].abs()
+    predictions["vtec_set_mlp_direct_error_iri"] = predictions["vtec_set_mlp_direct"] - predictions[args.vtec_target_column]
+    predictions["vtec_set_mlp_direct_abs_error_iri"] = predictions["vtec_set_mlp_direct_error_iri"].abs()
 
-    pred_path = save_table(
-        predictions, table_dir / f"{run_name}_predictions.{args.output_format}",
-    )
+    pred_path = save_table(predictions, table_dir / f"{run_name}_predictions.{args.output_format}")
 
-    # ── VTEC metrics ─────────────────────────────────────────────────
     vtec_meta = None
     if not args.skip_vtec_evaluation:
         vtec_meta = build_vtec_metrics(
-            input_path=pred_path,
-            table_dir=table_dir,
-            run_name=f"{run_name}_test",
-            target_column=args.vtec_target_column,
-            baseline_column=args.baseline_vtec_column,
+            input_path=pred_path, table_dir=table_dir, run_name=f"{run_name}_test",
+            target_column=args.vtec_target_column, baseline_column=args.baseline_vtec_column,
             vtec_prediction_columns=["vtec_set_mlp", "vtec_set_mlp_direct"],
-            stec_prediction_columns=[],
-            mapping_column=args.mapping_column,
-            elevation_bins=[float(s.strip())
-                            for s in args.elevation_bins.split(",")
-                            if s.strip()],
-            station_min_count=args.station_min_count,
-            max_rows=None,
+            stec_prediction_columns=[], mapping_column=args.mapping_column,
+            elevation_bins=[float(s.strip()) for s in args.elevation_bins.split(",") if s.strip()],
+            station_min_count=args.station_min_count, max_rows=None,
         )
 
-    # ── metadata ─────────────────────────────────────────────────────
     metadata: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "mode": "simulation_set_to_query",
-        "model": "set_ray_mlp",
-        "run_name": run_name,
+        "mode": "simulation_set_to_query", "model": "set_ray_mlp", "run_name": run_name,
         "input_file": str(input_path),
         "source_stec_column": args.source_stec_column,
         "slant_target_column": args.slant_target_column,
@@ -633,41 +462,20 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
         "n_obs_features": n_obs_cols,
         "set_stats": set_extra,
         "split": split_metadata,
-        "row_counts": {
-            "input": int(len(df)),
-            "train_rows": int(len(train_df)),
-            "test_rows": int(len(test_df)),
-            "train_examples": int(len(Y)),
-        },
+        "row_counts": {"input": int(len(df)), "train_rows": int(len(train_df)), "test_rows": int(len(test_df)), "train_examples": int(len(Y))},
         "hyperparameters": {
-            "epochs": int(args.epochs),
-            "batch_size": int(args.batch_size),
-            "learning_rate": float(args.learning_rate),
-            "weight_decay": float(args.weight_decay),
-            "dropout": float(args.dropout),
-            "seed": int(args.seed),
-            "device": str(device),
-            "spatial_sigma_km": float(args.spatial_sigma_km),
+            "epochs": int(args.epochs), "batch_size": int(args.batch_size),
+            "learning_rate": float(args.learning_rate), "weight_decay": float(args.weight_decay),
+            "dropout": float(args.dropout), "seed": int(args.seed),
+            "device": str(device), "spatial_sigma_km": float(args.spatial_sigma_km),
         },
         "history": history,
         "metrics": {
             "train_pair_stec": train_stec_metrics,
-            "test_slant_stec": regression_metrics(
-                predictions[args.slant_target_column],
-                predictions["stec_set_mlp"],
-            ),
-            "test_vtec": vtec_error_metrics(
-                predictions[args.vtec_target_column],
-                predictions["vtec_set_mlp"],
-            ),
-            "test_vtec_direct": vtec_error_metrics(
-                predictions[args.vtec_target_column],
-                predictions["vtec_set_mlp_direct"],
-            ),
-            "test_slm_vtec": vtec_error_metrics(
-                predictions[args.vtec_target_column],
-                predictions[args.baseline_vtec_column],
-            ),
+            "test_slant_stec": regression_metrics(predictions[args.slant_target_column], predictions["stec_set_mlp"]),
+            "test_vtec": vtec_error_metrics(predictions[args.vtec_target_column], predictions["vtec_set_mlp"]),
+            "test_vtec_direct": vtec_error_metrics(predictions[args.vtec_target_column], predictions["vtec_set_mlp_direct"]),
+            "test_slm_vtec": vtec_error_metrics(predictions[args.vtec_target_column], predictions[args.baseline_vtec_column]),
         },
         "outputs": {"predictions": str(pred_path)},
     }
@@ -676,18 +484,9 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
 
     ckpt_path = checkpoint_dir / f"{run_name}.pth"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "q_imputer": q_imp,
-        "q_scaler": q_scaler,
-        "o_imputer": o_imp,
-        "o_scaler": o_scaler,
-        "y_scaler": y_scaler,
-        "metadata": metadata,
-    }, ckpt_path)
+    torch.save({"model_state_dict": model.state_dict(), "q_imputer": q_imp, "q_scaler": q_scaler, "o_imputer": o_imp, "o_scaler": o_scaler, "y_scaler": y_scaler, "metadata": metadata}, ckpt_path)
     metadata["outputs"]["checkpoint"] = str(ckpt_path)
-    metadata["outputs"]["metrics_json"] = str(
-        write_json(metadata, table_dir / f"{run_name}_metrics.json"))
+    metadata["outputs"]["metrics_json"] = str(write_json(metadata, table_dir / f"{run_name}_metrics.json"))
     return metadata
 
 
@@ -704,23 +503,14 @@ def choose_simulation_split(df, args):
             left["timestamp"] = pd.to_datetime(left["timestamp"])
             right["timestamp"] = pd.to_datetime(right["timestamp"])
         marker = "_set_mlp_test_key"
-        merged = left.reset_index().merge(
-            right.assign(**{marker: True}),
-            on=key_columns, how="left", sort=False,
-        )
+        merged = left.reset_index().merge(right.assign(**{marker: True}), on=key_columns, how="left", sort=False)
         test_mask = merged[marker].fillna(False).to_numpy(bool)
         train_df = df.loc[~test_mask].copy()
         test_df = df.loc[test_mask].copy()
         if train_df.empty or test_df.empty:
             raise ValueError(f"Key holdout: train={len(train_df)}, test={len(test_df)}")
-        return train_df, test_df, {
-            "type": "key_holdout",
-            "test_keys_from": str(key_path),
-            "key_columns": key_columns,
-            "n_train": int(len(train_df)), "n_test": int(len(test_df)),
-        }
-    return choose_split(df, args.split, test_size=args.test_size,
-                        seed=args.seed, train_end=args.train_end)
+        return train_df, test_df, {"type": "key_holdout", "test_keys_from": str(key_path), "key_columns": key_columns, "n_train": int(len(train_df)), "n_test": int(len(test_df))}
+    return choose_split(df, args.split, test_size=args.test_size, seed=args.seed, train_end=args.train_end)
 
 
 def parse_args(argv=None):
@@ -752,12 +542,9 @@ def parse_args(argv=None):
     p.add_argument("--skip-vtec-evaluation", action="store_true")
     p.add_argument("--run-name")
     p.add_argument("--max-rows", type=int)
-    p.add_argument("--max-obs", type=int, default=40,
-                   help="Max observed rays per set example.")
-    p.add_argument("--nearby-km", type=float, default=200.0,
-                   help="IPP radius (km) for observation set construction.")
-    p.add_argument("--spatial-sigma-km", type=float, default=100.0,
-                   help="Spatial attention length-scale σ (km).")
+    p.add_argument("--max-obs", type=int, default=40, help="Max observed rays per set example.")
+    p.add_argument("--nearby-km", type=float, default=200.0, help="IPP radius (km) for observation set construction.")
+    p.add_argument("--spatial-sigma-km", type=float, default=100.0, help="Spatial attention length-scale σ (km).")
     return p.parse_args(argv)
 
 

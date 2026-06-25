@@ -95,7 +95,11 @@ def ray_edge_features(df: pd.DataFrame) -> np.ndarray:
     """Build edge features matching the reference notebook convention."""
 
     elevation_rad = np.deg2rad(df["elevation"].to_numpy(float))
-    azimuth_rad = np.deg2rad(df["azimuth"].to_numpy(float))
+    # The reference notebook computes azimuth with atan2, therefore its range
+    # is [-pi, pi].  The ray-wise parquet stores azimuth as [0, 360) degrees;
+    # wrap it before scaling to avoid a false discontinuity at north.
+    azimuth_deg = ((df["azimuth"].to_numpy(float) + 180.0) % 360.0) - 180.0
+    azimuth_rad = np.deg2rad(azimuth_deg)
     return np.column_stack((elevation_rad, azimuth_rad))
 
 
