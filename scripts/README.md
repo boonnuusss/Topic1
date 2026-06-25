@@ -98,6 +98,133 @@ The builder writes `stec_iri_ray`, `vtec_iri_ref`,
 vendored PyIRI package under `../00_iri/PyIRI` and records all IRI/grid/ray
 integration settings in metadata.
 
+## VTEC-Space Metrics
+
+Evaluate the SLM conversion baseline and optional ML-assisted columns against
+the IRI VTEC reference:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\evaluate_vtec_metrics.ps1 `
+  -InputPath datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  -RunName vtec_eval_20240505_0500_spacing2p5
+```
+
+Equivalent Python command:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.evaluate `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --table-dir results\tables `
+  --run-name vtec_eval_20240505_0500_spacing2p5
+```
+
+For future ML outputs, provide VTEC estimates with `-VtecPredictionColumns` or
+STEC estimates with `-StecPredictionColumns`; STEC estimates are converted to
+VTEC with `slm_mapping_factor_iri` before scoring.
+
+## RayMLP Simulation Training
+
+Train RayMLP as a STEC ray-transformation model on IRI simulation output:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\train_ray_mlp_simulation.ps1 `
+  -InputPath datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  -RunName ray_mlp_sim_20240505_0500_smoke `
+  -Epochs 5 `
+  -MaxRows 1000
+```
+
+Equivalent Python command:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_ray_mlp_simulation `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name ray_mlp_sim_20240505_0500_smoke `
+  --epochs 5 `
+  --max-rows 1000
+```
+
+The model is trained only with simulated slant-ray STEC labels. VTEC is not used
+as a training label; it is used after training to evaluate the model queried with
+slant and vertical target rays. Main output columns are `stec_ray_mlp`,
+`vtec_ray_mlp_direct`, `ray_mlp_conversion_ratio`, and the final converted
+`vtec_ray_mlp`.
+
+To reuse a previous test split, pass a prediction table containing the held-out
+row keys:
+
+```powershell
+.\scripts\train_ray_mlp_simulation.ps1 `
+  -InputPath datasets\interim\iri_simulation_20240505_0400_0600_spacing2p5_regular.parquet `
+  -RunName ray_mlp_sim_0400_0600_e100_ut05_fixedtest `
+  -TestKeysFrom results\tables\ray_mlp_sim_0500_random_e100_ratiofix_predictions.parquet `
+  -TestKeyColumns timestamp,station,prn `
+  -Epochs 100 `
+  -BatchSize 128 `
+  -Device cpu
+```
+
+## FNN Simulation Training
+
+Train the compact FNN adapted from
+`../00_iri/mycode/ML_sTEC/FNN_sTEC_test.ipynb`:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\train_fnn_simulation.ps1 `
+  -InputPath datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  -RunName fnn_sim_0500_ecef6_e500_fixedtest `
+  -FeatureSet ecef6 `
+  -TestKeysFrom results\tables\ray_mlp_sim_0500_random_e100_ratiofix_predictions.parquet `
+  -TestKeyColumns timestamp,station,prn `
+  -Epochs 500 `
+  -BatchSize 64 `
+  -Device cpu
+```
+
+Supported feature sets:
+
+- `ecef6`: `rec_x, rec_y, rec_z, sat_x, sat_y, sat_z`; notebook default.
+- `blh6`: receiver/satellite lon, lat, height.
+- `bl4`: receiver/satellite lon and lat only.
+
+Main output columns are `stec_fnn`, `vtec_fnn_direct`,
+`fnn_conversion_ratio`, and final converted `vtec_fnn`.
+
+## GNN Simulation Training
+
+Train the receiver/satellite graph edge regressor adapted from
+`../00_iri/mycode/ML_sTEC/GNN_sTEC_improve.ipynb`:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\train_gnn_simulation.ps1 `
+  -InputPath datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  -RunName gnn_sim_0500_e500_fixedtest `
+  -TestKeysFrom results\tables\ray_mlp_sim_0500_random_e100_ratiofix_predictions.parquet `
+  -TestKeyColumns timestamp,station,prn `
+  -Epochs 500 `
+  -Device cpu
+```
+
+Equivalent Python command:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_gnn_simulation `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name gnn_sim_0500_e500_fixedtest `
+  --test-keys-from results\tables\ray_mlp_sim_0500_random_e100_ratiofix_predictions.parquet `
+  --test-key-columns timestamp,station,prn `
+  --epochs 500 `
+  --device cpu
+```
+
+Main output columns are `stec_gnn`, `vtec_gnn_direct`,
+`gnn_conversion_ratio`, and final converted `vtec_gnn`. The implementation is a
+pure-PyTorch GraphSAGE-style model, so it does not require `torch_geometric`.
+
 ## Legacy Off-mainline SLM STEC Baseline
 
 The older wrapper below predicts STEC from an external VTEC source:

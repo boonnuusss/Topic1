@@ -92,6 +92,59 @@ It specifies `stec_iri_ray` as the full receiver-satellite ray integral,
 `vtec_iri_ref` as the IPP vertical reference, and
 `vtec_slm_from_iri_stec` as the classical SLM conversion of simulated STEC.
 
+## VTEC-Space Metrics
+
+All mainline evaluation is in VTEC space with the convention:
+
+```text
+error = VTEC_prediction - VTEC_reference
+```
+
+For the IRI simulation, the default reference is `vtec_iri_ref` and the SLM
+baseline prediction is `vtec_slm_from_iri_stec`. Primary metrics are RMSE, MAE,
+bias, median error, 5th/95th percentile error, maximum absolute error, and R2.
+Metrics are reported overall and by elevation bin, station, and UTC hour.
+
+ML-assisted conversion can be evaluated in either of three table forms:
+
+- a model-produced VTEC column, compared directly with `vtec_iri_ref`;
+- a model-produced STEC column, converted to VTEC with
+  `VTEC_ml = STEC_ml / slm_mapping_factor_iri`.
+- the current RayMLP simulation route, where the network is trained only on
+  simulated slant-ray STEC labels and then queried with a vertical special-ray
+  geometry for VTEC conversion.
+
+Improvements are reported as deltas and percentage reductions relative to the
+SLM baseline; negative `delta_rmse_vs_slm_tecu` or positive
+`rmse_reduction_vs_slm_pct` means improvement.
+
+## RayMLP Simulation Route
+
+The mainline RayMLP training entry point is:
+
+```text
+python -m src.train_ray_mlp_simulation
+```
+
+It does not learn a VTEC residual, and `vtec_iri_ref` must not be used as a
+training label. Instead, it learns a STEC model from simulated slant rays:
+
+```text
+source slant STEC ray + source ray geometry + original slant target geometry
+-> slant target STEC
+```
+
+For STEC-to-VTEC conversion, the trained STEC model is queried with both the
+original slant target ray and a vertical target ray at the same IPP/time. The
+final converted VTEC is:
+
+```text
+vtec_ray_mlp = source_STEC * vtec_ray_mlp_direct / stec_ray_mlp
+```
+
+`vtec_iri_ref` is used only after training to evaluate that converted
+prediction.
+
 ## Legacy Off-mainline Work
 
 The previously implemented `stec_slm`, direct STEC prediction, and

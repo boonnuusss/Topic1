@@ -159,6 +159,131 @@ for an earlier STEC-prediction route. They are not the current mainline target.
 | `stec_slm` | Legacy STEC prediction, `M(elevation) * vtec_baseline` | TECU |
 | `stec_residual_slm` | Legacy residual target, `stec_obs - stec_slm` | TECU |
 
+## VTEC-Space Metric Tables
+
+These tables are produced by `python -m src.evaluate` and compare SLM or
+ML-assisted VTEC estimates against a reference VTEC column, usually
+`vtec_iri_ref`.
+
+Default outputs:
+
+```text
+results/tables/<run_name>_vtec_metrics.csv
+results/tables/<run_name>_vtec_overall_metrics.csv
+results/tables/<run_name>_vtec_elevation_bin_metrics.csv
+results/tables/<run_name>_vtec_station_metrics.csv
+results/tables/<run_name>_vtec_utc_hour_metrics.csv
+results/tables/<run_name>_vtec_metrics.metadata.json
+```
+
+Metric convention:
+
+```text
+error = prediction - reference
+```
+
+Core columns:
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `scope` | Metric scope: `overall`, `elevation_bin`, `station`, or `utc_hour` | string |
+| `model` | Model label, for example `slm` or `ml_assisted_from_stec_ray_mlp` | string |
+| `prediction_column` | VTEC column evaluated after any STEC-to-VTEC conversion | string |
+| `prediction_source` | `vtec_prediction` or `stec_prediction` | string |
+| `source_column` | Original STEC column if converted to VTEC | string |
+| `target_column` | Reference VTEC column, usually `vtec_iri_ref` | string |
+| `elevation_bin_deg` | Elevation bin label when `scope=elevation_bin` | degree bin |
+| `station` | Station label when `scope=station` | string |
+| `utc_hour` | UTC-hour label when `scope=utc_hour` | string |
+| `n_samples` | Number of finite prediction/reference pairs | integer |
+| `n_missing` | Number of non-finite pairs excluded from metrics | integer |
+| `bias_tecu` | Mean VTEC error | TECU |
+| `median_error_tecu` | Median VTEC error | TECU |
+| `std_error_tecu` | Standard deviation of VTEC error | TECU |
+| `mae_tecu` | Mean absolute VTEC error | TECU |
+| `rmse_tecu` | Root-mean-square VTEC error | TECU |
+| `p05_error_tecu`, `p95_error_tecu` | 5th and 95th percentile VTEC error | TECU |
+| `max_abs_error_tecu` | Maximum absolute VTEC error | TECU |
+| `r2` | R2 in VTEC space | unitless |
+| `delta_rmse_vs_slm_tecu` | RMSE difference relative to the SLM baseline | TECU |
+| `delta_mae_vs_slm_tecu` | MAE difference relative to the SLM baseline | TECU |
+| `rmse_reduction_vs_slm_pct` | RMSE reduction relative to SLM; positive means improvement | percent |
+| `mae_reduction_vs_slm_pct` | MAE reduction relative to SLM; positive means improvement | percent |
+
+## RayMLP Simulation Prediction Columns
+
+These columns are produced by `python -m src.train_ray_mlp_simulation`. The
+model is trained as a STEC ray model, not as a direct VTEC residual model.
+`vtec_iri_ref` is not used during training; it is used only for post-training
+evaluation.
+
+Model input concept:
+
+```text
+source slant STEC + source ray geometry + target ray geometry -> target STEC
+```
+
+During training, the target ray is the original slant ray and the label is
+`stec_iri_ray`. For STEC-to-VTEC conversion, the trained model is queried twice:
+once with the original slant target ray and once with a vertical target ray at
+the same IPP/time. The final conversion uses the model-implied ratio between the
+vertical and slant target responses.
+
+```text
+ray_mlp_conversion_ratio = vtec_ray_mlp_direct / stec_ray_mlp
+vtec_ray_mlp = stec_iri_observable * ray_mlp_conversion_ratio
+```
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `stec_ray_mlp` | RayMLP prediction when the target ray is the original slant ray | TECU |
+| `vtec_ray_mlp_direct` | Raw RayMLP prediction for the vertical target ray before ratio conversion | TECU |
+| `ray_mlp_conversion_ratio` | Model-implied vertical/slant response ratio, `vtec_ray_mlp_direct / stec_ray_mlp` | unitless |
+| `vtec_ray_mlp` | Final RayMLP-assisted converted VTEC estimate | TECU |
+| `vtec_ray_mlp_error_iri` | `vtec_ray_mlp - vtec_iri_ref` | TECU |
+| `vtec_ray_mlp_abs_error_iri` | Absolute RayMLP VTEC error | TECU |
+| `vtec_ray_mlp_direct_error_iri` | Direct vertical-query diagnostic error, `vtec_ray_mlp_direct - vtec_iri_ref` | TECU |
+| `vtec_ray_mlp_direct_abs_error_iri` | Absolute direct vertical-query diagnostic error | TECU |
+
+## FNN Simulation Prediction Columns
+
+These columns are produced by `python -m src.train_fnn_simulation`. The FNN is
+adapted from `../00_iri/mycode/ML_sTEC/FNN_sTEC_test.ipynb` and maps ray
+geometry directly to STEC.
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `stec_fnn` | FNN prediction for the original slant ray | TECU |
+| `vtec_fnn_direct` | Raw FNN prediction for the vertical target ray before ratio conversion | TECU |
+| `fnn_conversion_ratio` | Model-implied vertical/slant response ratio, `vtec_fnn_direct / stec_fnn` | unitless |
+| `vtec_fnn` | Final FNN-assisted converted VTEC estimate | TECU |
+| `vtec_fnn_error_iri` | `vtec_fnn - vtec_iri_ref` | TECU |
+| `vtec_fnn_abs_error_iri` | Absolute FNN VTEC error | TECU |
+| `vtec_fnn_direct_error_iri` | Direct vertical-query diagnostic error, `vtec_fnn_direct - vtec_iri_ref` | TECU |
+| `vtec_fnn_direct_abs_error_iri` | Absolute direct vertical-query diagnostic error | TECU |
+
+## GNN Simulation Prediction Columns
+
+These columns are produced by `python -m src.train_gnn_simulation`. The GNN is
+adapted from `../00_iri/mycode/ML_sTEC/GNN_sTEC_improve.ipynb` as a
+receiver/satellite graph edge regressor. Nodes are receiver and satellite ECEF
+positions; ray edges carry elevation and azimuth features. Receiver-receiver
+KNN edges provide spatial message-passing context but do not have STEC labels.
+
+Training uses only simulated slant-ray `stec_iri_ray` labels. `vtec_iri_ref`
+is used only for post-training VTEC-space evaluation.
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `stec_gnn` | GNN prediction for the original slant receiver-satellite edge | TECU |
+| `vtec_gnn_direct` | Raw GNN prediction for the vertical special edge before ratio conversion | TECU |
+| `gnn_conversion_ratio` | Model-implied vertical/slant response ratio, `vtec_gnn_direct / stec_gnn` | unitless |
+| `vtec_gnn` | Final GNN-assisted converted VTEC estimate | TECU |
+| `vtec_gnn_error_iri` | `vtec_gnn - vtec_iri_ref` | TECU |
+| `vtec_gnn_abs_error_iri` | Absolute GNN VTEC error | TECU |
+| `vtec_gnn_direct_error_iri` | Direct vertical-query diagnostic error, `vtec_gnn_direct - vtec_iri_ref` | TECU |
+| `vtec_gnn_direct_abs_error_iri` | Absolute direct vertical-query diagnostic error | TECU |
+
 ## Current Quality Control
 
 - `stec_obs` is not NaN.

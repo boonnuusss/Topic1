@@ -41,13 +41,27 @@ def constellation_from_prn(mapped_prn: int) -> str:
     return "GPS"
 
 
+_geo_transformer = None
+
+
+def _get_geo_transformer():
+    """Return a cached pyproj Transformer for ECEF→geodetic conversion."""
+    global _geo_transformer
+    if _geo_transformer is None:
+        try:
+            from pyproj import Transformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "pyproj is required to convert SP3 ECEF to BLH."
+            ) from exc
+        _geo_transformer = Transformer.from_crs(
+            "EPSG:4978", "EPSG:4326", always_xy=True
+        )
+    return _geo_transformer
+
+
 def _ecef_to_geodetic(x, y, z):
-    try:
-        from pyproj import Transformer
-    except ImportError as exc:
-        raise RuntimeError("pyproj is required to convert SP3 ECEF to BLH.") from exc
-    transformer = Transformer.from_crs("EPSG:4978", "EPSG:4326", always_xy=True)
-    lon, lat, h_m = transformer.transform(x, y, z)
+    lon, lat, h_m = _get_geo_transformer().transform(x, y, z)
     return lon, lat, np.asarray(h_m) / 1000.0
 
 

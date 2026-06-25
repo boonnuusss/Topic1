@@ -25,3 +25,24 @@ def build_ray_mlp(input_dim: int, dropout: float = 0.1):
         nn.Linear(64, 1),
     )
 
+
+def build_fnn_stec(input_dim: int = 6, dropout: float = 0.2):
+    """Create the compact FNN used by the legacy ML_sTEC notebook.
+
+    The reference notebook ``FNN_sTEC_test.ipynb`` uses:
+    ``input -> 64 -> 32 -> 1`` with BatchNorm, ReLU, and Dropout.
+    """
+
+    import torch.nn as nn
+
+    return nn.Sequential(
+        nn.Linear(input_dim, 64),
+        nn.BatchNorm1d(64),
+        nn.ReLU(),
+        nn.Dropout(dropout),
+        nn.Linear(64, 32),
+        nn.BatchNorm1d(32),
+        nn.ReLU(),
+        nn.Dropout(dropout),
+        nn.Linear(32, 1),
+    )

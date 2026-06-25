@@ -8,16 +8,28 @@ import pandas as pd
 
 EARTH_RADIUS_KM = 6371.0
 
+_ecef_transformer = None
+
+
+def _get_ecef_transformer():
+    """Return a cached pyproj Transformer for geodetic→ECEF conversion."""
+    global _ecef_transformer
+    if _ecef_transformer is None:
+        try:
+            from pyproj import Transformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "pyproj is required for geodetic/ECEF conversion."
+            ) from exc
+        _ecef_transformer = Transformer.from_crs(
+            "EPSG:4326", "EPSG:4978", always_xy=True
+        )
+    return _ecef_transformer
+
 
 def geodetic_to_ecef(lon_deg, lat_deg, height_m=0.0):
     """Convert geodetic lon/lat/height to ECEF meters."""
-
-    try:
-        from pyproj import Transformer
-    except ImportError as exc:
-        raise RuntimeError("pyproj is required for geodetic/ECEF conversion.") from exc
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:4978", always_xy=True)
-    return transformer.transform(lon_deg, lat_deg, height_m)
+    return _get_ecef_transformer().transform(lon_deg, lat_deg, height_m)
 
 
 def add_receiver_ecef(df: pd.DataFrame) -> pd.DataFrame:

@@ -21,8 +21,8 @@ The current route is:
    `VTEC_slm = STEC_obs / M(elevation)`.
 3. Use IRI-generated background ionosphere fields to run controlled simulation
    experiments with known reference VTEC/STEC relationships.
-4. Train ray-wise ML STEC models, starting with RayMLP after the simulation
-   labels and SLM baseline are stable.
+4. Train ray-wise ML STEC models, starting with RayMLP/FNN/GNN variants after
+   the simulation labels and SLM baseline are stable.
 5. Compare SLM and ML-assisted STEC-to-VTEC conversion in VTEC space, using
    metrics such as VTEC RMSE, MAE, bias, elevation-bin error, station-bin error,
    PRN-bin error, and spatial residual maps.
@@ -184,6 +184,106 @@ The simulation builder entry point is:
 
 Start with small smoke tests. Full-day high-resolution ray integration can be
 expensive, so the builder includes a per-epoch IRI query-point safety limit.
+
+## VTEC-Space Evaluation
+
+The current comparison endpoint is `python -m src.evaluate`. It treats
+`vtec_iri_ref` as the default reference and `vtec_slm_from_iri_stec` as the SLM
+baseline:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.evaluate `
+  --input datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --table-dir results/tables `
+  --run-name vtec_eval_20240505_0500_spacing2p5
+```
+
+The evaluator writes overall, elevation-bin, station-bin, UTC-hour, and merged
+metric tables. The error convention is:
+
+```text
+error = VTEC_prediction - VTEC_reference
+```
+
+Future ML-assisted conversion results can be evaluated by passing either VTEC
+prediction columns:
+
+```powershell
+--vtec-prediction-columns vtec_ray_mlp
+```
+
+or other STEC prediction columns, if that model is meant to be converted through
+the same mapping factor:
+
+```powershell
+--stec-prediction-columns stec_other_model --mapping-column slm_mapping_factor_iri
+```
+
+## Current ML Simulation Entrypoints
+
+- `python -m src.train_ray_mlp_simulation`: RayMLP ray-transformation STEC
+  model.
+- `python -m src.train_fnn_simulation`: compact FNN adapted from the local
+  `FNN_sTEC_test.ipynb`.
+- `python -m src.train_gnn_simulation`: pure-PyTorch GraphSAGE-style edge
+  regressor adapted from `GNN_sTEC_improve.ipynb`.
+
+All three train on simulated slant-ray `stec_iri_ray` labels only. They query a
+vertical special ray after training and are scored against `vtec_iri_ref` only
+in the evaluation step.
+
+For the RayMLP simulation route below, evaluate `vtec_ray_mlp` as the final
+ratio-converted VTEC prediction column. The raw vertical target-ray model output
+is retained separately as `vtec_ray_mlp_direct` for diagnostics.
+
+## RayMLP Simulation Training
+
+The current mainline RayMLP entry point is:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_ray_mlp_simulation `
+  --input datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name ray_mlp_sim_20240505_0500_smoke `
+  --epochs 5 `
+  --max-rows 1000
+```
+
+Equivalent wrapper:
+
+```powershell
+.\scripts\train_ray_mlp_simulation.ps1 `
+  -InputPath datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  -RunName ray_mlp_sim_20240505_0500_smoke `
+  -Epochs 5 `
+  -MaxRows 1000
+```
+
+This trains RayMLP only on simulated slant-ray STEC labels:
+
+```text
+source slant STEC + source geometry + target geometry -> target STEC
+```
+
+For training, the target geometry is the original slant ray and the label is
+`stec_iri_ray`. For conversion/evaluation, the same trained STEC model is queried
+with both the original slant target ray and a vertical target ray at the same
+IPP/time. The output table includes `stec_ray_mlp`, `vtec_ray_mlp_direct`,
+`ray_mlp_conversion_ratio`, and the final ratio-converted `vtec_ray_mlp`, which
+is then evaluated by `src.evaluate`.
+
+## FNN Simulation Training
+
+The notebook-style FNN entry point is:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_fnn_simulation `
+  --input datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --feature-set ecef6 `
+  --epochs 500
+```
+
+It adapts `../00_iri/mycode/ML_sTEC/FNN_sTEC_test.ipynb` to the Topic1 IRI
+simulation table. Supported feature sets are `ecef6`, `blh6`, and `bl4`.
 
 ## Reproducibility Rules
 

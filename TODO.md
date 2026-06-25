@@ -26,9 +26,11 @@ IRI-backed simulation experiment for ML-assisted conversion.
 - [x] Design the IRI-backed simulation schema: reference VTEC, simulated STEC,
   shell height, integration assumptions, and metadata.
 - [x] Implement the IRI simulation dataset builder.
-- [ ] Define VTEC-space metrics for SLM versus ML-assisted conversion.
-- [ ] Adapt RayMLP training to the simulation setting.
-- [ ] Compare SLM conversion and RayMLP-assisted conversion under random, time,
+- [x] Define VTEC-space metrics for SLM versus ML-assisted conversion.
+- [x] Adapt RayMLP training to the simulation setting.
+- [x] Adapt FNN and GNN notebook-style models to the UT05:00 IRI simulation
+  setting for slant STEC training and vertical-query VTEC conversion tests.
+- [ ] Compare SLM conversion and ML-assisted conversion under random, time,
   station, and PRN splits.
 - [ ] Add paper-quality result figures and tables.
 - [ ] Draft methods section after the SLM and IRI simulation results are stable.
@@ -51,9 +53,9 @@ preserved for reference but are not the current mainline:
 
 ## Highest Priority Next
 
-Define VTEC-space metrics for SLM versus ML-assisted conversion. Start with
-metrics on the IRI simulation smoke output, then scale after the simulation
-builder settings are finalized.
+Compare SLM conversion and ML-assisted conversion under random, time, station,
+and PRN splits. Start with the UT05:00 IRI simulation product, then scale to
+more epochs after runtime and memory behavior are stable.
 
 ## Blocked / Needs User Decision
 
