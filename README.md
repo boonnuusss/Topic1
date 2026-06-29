@@ -230,6 +230,8 @@ the same mapping factor:
   IPP-nearby ray pairs.
 - `python -m src.train_set_mlp`: set-to-query STEC model that encodes nearby
   observed rays and predicts a query ray.
+- `python -m src.train_set_ratio_mlp`: source-ratio set/context model for direct
+  STEC-to-VTEC conversion via predicted target/source STEC ratios.
 - `python -m src.train_fnn_simulation`: compact FNN adapted from the local
   `FNN_sTEC_test.ipynb`.
 - `python -m src.train_gnn_simulation`: pure-PyTorch GraphSAGE-style edge
@@ -244,6 +246,8 @@ Current UT05:00 random-split benchmark status:
 | Route | VTEC RMSE | R2 | Notes |
 | --- | ---: | ---: | --- |
 | SLM baseline | 2.44 | 0.961 | Traditional reference |
+| Set-ratio MLP, source anchor only, 100ep | 1.51 | 0.985 | Best current UT05 random pure model; source-ratio set architecture with one anchor observation |
+| Set-ratio MLP, ctx100 obs5, 100ep | 2.10 | 0.971 | Small context helps SLM but is worse than anchor-only |
 | RayMLP source-ratio nearby200, 100ep, with self-pairs | 2.13 | 0.970 | Default nearby behavior; self-pair ratio is exactly 1 in this simulation |
 | RayMLP source-ratio nearby200, 100ep, no self-pairs | 3.25 | 0.931 | Diagnostic; pure VTEC conversion worsens |
 | Hybrid low-elevation ML, threshold 30 deg | 1.99 | 0.974 | Earlier random-split diagnostic, but less conservative under stricter splits |
@@ -273,12 +277,14 @@ motivated, truth-free rules.
 | PRN holdout UT05:00, seed 7 | 2.97 | 2.41 | 1.90 | 1.87 | Improves SLM |
 | PRN holdout UT05:00, seed 123 | 2.15 | 2.90 | 2.19 | 1.77 | Improves SLM |
 
-The present best evidence is therefore not that pure RayMLP replaces SLM.
-Rather, RayMLP can help in the lowest-elevation regime where SLM is weakest,
-while SLM remains preferable elsewhere. Hybrid results are useful for diagnosing
-where ML helps, but the main scientific route should prioritize the STEC ray
-model and its truth-free STEC-to-VTEC conversion behavior, because real
-observational data do not provide VTEC truth for selecting a hybrid rule.
+The present best random-split evidence is that source-ratio STEC models can beat
+SLM without using VTEC truth for training or model selection. The new
+set-ratio anchor-only model is the strongest UT05:00 random result so far, but
+it still needs strict station/time/PRN and independent-day validation. Hybrid
+results remain useful for diagnosing where ML helps, but the main scientific
+route should prioritize the STEC ray model and its truth-free STEC-to-VTEC
+conversion behavior, because real observational data do not provide VTEC truth
+for selecting a hybrid rule.
 
 For the RayMLP simulation route below, evaluate `vtec_ray_mlp` as the final
 ratio-converted VTEC prediction column. The raw vertical target-ray model output
@@ -352,6 +358,39 @@ also requires the ML VTEC estimate to be lower than the SLM estimate:
   -ElevationThresholdDeg 20 `
   -MlMustLowerSlm
 ```
+
+## Set-Ratio Context Training
+
+The current best UT05:00 random pure-model result uses a source-ratio
+set/context entry point:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_anchor1_e100 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu
+```
+
+This model trains on nearby slant-ray pairs with target
+`target_STEC / source_STEC`. The observation set contains the source ray and an
+`is_source_anchor` flag, so the model learns the same source-ratio task as
+RayMLP while using the set-to-query architecture. VTEC inference is simply:
+
+```text
+vtec_set_ratio_mlp = source_STEC * predicted_vertical_ratio
+```
+
+The anchor-only version reached `1.5060` TECU RMSE on the UT05:00 random split,
+versus `2.1300` for RayMLP source-ratio and `2.4400` for SLM. Adding broader
+context was not automatically better: `context_km=100, max_obs=5` gave `2.0997`,
+and `context_km=200, max_obs=40` gave `3.4199`. Treat neighbor context as a
+research variable, not an assumed improvement.
 
 ## Set-to-Query Simulation Training
 

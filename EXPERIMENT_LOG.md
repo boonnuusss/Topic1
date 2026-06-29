@@ -2183,3 +2183,105 @@ optimizing for the IRI benchmark rather than for the real STEC-to-VTEC problem.
 Going forward, hybrid products should be reported mainly as diagnostics or as
 pre-specified, truth-free physical sanity checks. The main research effort should
 return to the STEC ray model and its direct, truth-free conversion behavior.
+
+## 2026-06-29 Experiment 034: Source-Ratio Set/Context Model For UT05:00
+
+### Purpose
+
+Test the next modeling direction after single-pair RayMLP: use a set/context
+architecture so a query ray can attend to observable surrounding slant rays.
+The experiment keeps the current scientific constraint: `vtec_iri_ref` is never
+used for training or model selection inside the model. It is used only for the
+final IRI-simulation evaluation.
+
+### Plan
+
+1. Add a diagnostic Set-to-Query variant with query-relative observation
+   features, to test whether explicitly exposing source-query geometry improves
+   vertical-ray inference.
+2. Add a new source-ratio set/context entry point, where the model predicts
+   `target_STEC / source_STEC` from an observation set and target query geometry.
+3. Compare against the existing UT05:00 random-split SLM and RayMLP source-ratio
+   baselines.
+4. Treat hybrid outputs as diagnostic only; this experiment evaluates pure model
+   VTEC conversion.
+
+### Code Changes
+
+- `src.train_set_mlp` now supports `--relative-obs-features` and can rebuild
+  observation-set features relative to each query ray.
+- `src.train_set_ratio_mlp` was added as a source-ratio set/context model. Its
+  observation set includes an `is_source_anchor` flag and its inference output is
+  `vtec_set_ratio_mlp = source_STEC * predicted_vertical_ratio`.
+- The new route trains only on simulated slant-ray STEC ratios. The VTEC truth
+  column remains evaluation-only.
+
+### Validation
+
+Compile checks passed:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_set_mlp.py src\train_set_ratio_mlp.py src\models\set_mlp.py
+```
+
+Smoke tests passed on `--max-rows 300 --epochs 2` for both the relative
+Set-to-Query option and the new source-ratio set/context entry point.
+
+### UT05:00 Random-Split Results
+
+All rows use the same UT05:00 IRI simulation parquet and random seed 42 unless
+noted otherwise.
+
+| Route | VTEC RMSE | VTEC MAE | Bias | R2 | Interpretation |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SLM baseline | 2.4400 | 1.4326 | +1.1364 | 0.9610 | Classical reference |
+| RayMLP source-ratio with self | 2.1300 | 1.3649 | -0.5012 | 0.9703 | Strong single-pair ML baseline |
+| Set-to-Query relative obs features | 47.7789 | 47.0463 | +47.0463 | -13.9558 | Failed; vertical query became severe OOD |
+| Set-ratio ctx200 obs40, 50ep | 3.4199 | 2.7186 | +1.0211 | 0.9234 | Broad context adds noise |
+| Set-ratio ctx100 obs5, 100ep | 2.0997 | 1.7059 | -0.2676 | 0.9711 | Competitive with RayMLP but worse than anchor-only |
+| Set-ratio anchor1, 100ep | 1.5060 | 1.0912 | +0.0200 | 0.9851 | Best current UT05 random pure model |
+
+### Elevation-Bin Diagnostics
+
+The leading set-ratio anchor-only run improves the low-elevation bins where SLM
+is weakest. Above about 40 deg, SLM is already very accurate, and the pure ML
+conversion is slightly worse in RMSE; this is a useful warning for later
+truth-free rule design.
+
+| Elevation bin | n | SLM RMSE | Set-ratio anchor1 RMSE | Set-ratio MAE | Set-ratio bias | Set-ratio R2 | RMSE change vs SLM |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| [10,20) | 49 | 5.8390 | 2.2317 | 1.7881 | -0.0937 | 0.9595 | -3.6073 |
+| [20,30) | 68 | 2.8787 | 2.0302 | 1.4510 | +0.5760 | 0.9658 | -0.8485 |
+| [30,40) | 64 | 1.4483 | 1.4354 | 1.0332 | -0.0126 | 0.9887 | -0.0128 |
+| [40,50) | 69 | 0.9515 | 1.2724 | 1.0250 | -0.4296 | 0.9869 | +0.3209 |
+| [50,60) | 78 | 0.7676 | 1.2834 | 1.0021 | -0.1415 | 0.9870 | +0.5158 |
+| [60,70) | 49 | 0.5748 | 0.9253 | 0.7942 | +0.1879 | 0.9918 | +0.3505 |
+| [70,80) | 28 | 0.2135 | 0.6142 | 0.4659 | +0.3127 | 0.9976 | +0.4007 |
+| [80,90) | 14 | 0.1333 | 0.3195 | 0.2834 | -0.1906 | 0.9993 | +0.1863 |
+
+### Interpretation
+
+The useful signal is not simply "more context". The best result came from the
+source-ratio formulation plus an explicit source-anchor observation. That keeps
+the same-ray identity behavior visible to the set model and gives a stable
+vertical conversion ratio.
+
+Naively adding neighbor context did not guarantee improvement. A small local set
+(`context_km=100`, `max_obs=5`) stayed competitive, but a broader set
+(`context_km=200`, `max_obs=40`) degraded the VTEC result. This suggests the
+next context-model work should add better neighbor selection, weighting,
+regularization, or station/epoch grouping before treating multi-ray context as a
+mainline improvement.
+
+The anchor-only run is architecturally set-to-query, but with one observation it
+is closer to a source-anchor ratio model than a full multi-neighbor context
+model. Its `1.5060` TECU random-split RMSE is promising, but it must be tested
+under station, time, PRN, and independent-day splits before making a scientific
+claim.
+
+### Next Step
+
+Use `src.train_set_ratio_mlp` as the leading pure-ML route for the next strict
+validation round. Start with the anchor-only configuration, then test whether
+carefully constrained neighbor context can improve robustness without tuning
+against VTEC truth.

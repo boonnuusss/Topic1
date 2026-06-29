@@ -104,12 +104,14 @@ Current single-epoch UT05:00 modeling status:
 | Identity-only RayMLP | Diagnostic only | Fits slant STEC but fails VTEC conversion because the vertical query is out of distribution. |
 | All-to-all RayMLP pairs | Tested | Better than identity-only but worse than local filtering. |
 | IPP-nearby RayMLP pairs | Active baseline | 200 km filtering reaches near-SLM VTEC accuracy with far fewer pairs. |
-| RayMLP source-ratio pairs with self-pairs | Current leading pure-ML route | Nearby200, 100ep trains target/source STEC ratio and reduces UT05:00 random-split VTEC RMSE from 2.44 to 2.13 TECU. |
+| Set-ratio source-anchor model | Current leading UT05 random pure-ML route | Source-ratio set architecture with only the source anchor reaches 1.51 TECU RMSE without VTEC truth in training. |
+| RayMLP source-ratio pairs with self-pairs | Strong pair-ML baseline | Nearby200, 100ep trains target/source STEC ratio and reduces UT05:00 random-split VTEC RMSE from 2.44 to 2.13 TECU. |
 | RayMLP source-ratio no-self pairs | Diagnostic | Excluding `i -> i` worsens pure VTEC conversion to 3.25 TECU on the same random split. |
 | Low-elevation gated hybrid20 | Simulation diagnostic / sanity check | Uses a truth-free rule below 20 deg, but hybrid selection is not a main operational target because real observations lack VTEC truth. |
 | Low-elevation gated hybrid20 no-self | Random-split diagnostic only | Shows gate sensitivity in IRI simulation; not worth optimizing further without a truth-free physical rationale. |
 | Low-elevation hybrid30 | Random-split diagnostic | Best earlier UT05:00 random-split RMSE was 1.99 TECU, but the 20-30 deg bin can degrade stricter splits. |
-| Set-to-query model | Secondary route | Nearby200, sigma100, 100ep slightly surpasses SLM on UT05:00 random split; strict splits still need testing. |
+| Set-to-query absolute model | Secondary/diagnostic route | Absolute-STEC set-to-query slightly surpasses SLM, but source-ratio formulation is now stronger. |
+| Neighbor context in set-ratio model | Diagnostic | Small context (`100 km`, `5` obs) is competitive, but larger context degraded VTEC; context aggregation needs more design. |
 | FNN/GNN notebook ports | Diagnostics | Useful implementation checks, but not current leading routes. |
 
 Current strict split summary for RayMLP source-ratio plus gated hybrid20 uses the with-self nearby default. These hybrid numbers are retained mainly to diagnose low-elevation behavior in IRI simulation. Because real observations do not include VTEC truth, selecting among hybrid gates by `vtec_iri_ref` performance is not a transferable operational strategy:

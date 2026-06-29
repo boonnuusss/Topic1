@@ -44,6 +44,10 @@ IRI-backed simulation experiment for ML-assisted conversion.
   for source-ratio RayMLP.
 - [x] Record the limitation that real observation data lack VTEC truth, so
   hybrid-gate exploration is diagnostic rather than a mainline objective.
+- [x] Implement and test a source-ratio set/context model with a source-anchor
+  observation flag.
+- [ ] Validate the leading set-ratio anchor-only model under station, time, PRN,
+  and independent-day splits.
 - [ ] Validate core RayMLP / Set-to-Query STEC-to-VTEC conversion on independent
   days without relying on hybrid selection tuned by `vtec_iri_ref`.
 - [ ] Validate leading Set-to-Query configurations under time, station, and PRN
@@ -69,11 +73,13 @@ preserved for reference but are not the current mainline:
 
 ## Highest Priority Next
 
-Validate the core STEC-to-VTEC modeling route on independent days. Hybrid gates
-remain useful for IRI simulation diagnostics, but they should not drive the main
-research direction because real observation data do not provide VTEC truth for
-choosing the best gate. Prioritize truth-free model behavior, physically
-pre-specified conversion rules, and larger multi-epoch validation.
+Validate the source-ratio set-anchor model under strict splits and independent
+days. It is the current best UT05:00 random pure-model result, but random splits
+can be optimistic. Hybrid gates remain useful for IRI simulation diagnostics,
+but they should not drive the main research direction because real observation
+data do not provide VTEC truth for choosing the best gate. Prioritize truth-free
+model behavior, physically pre-specified conversion rules, and larger
+multi-epoch validation.
 
 ## Blocked / Needs User Decision
 
