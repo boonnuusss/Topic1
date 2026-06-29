@@ -20,10 +20,14 @@ the means; improved VTEC conversion is the scientific endpoint.
 - H3: IRI-generated background ionosphere fields can provide controlled
   reference VTEC/STEC relationships for simulation experiments before using
   noisier external products.
-- H4: ML methods such as RayMLP should be evaluated by their VTEC conversion
-  error, not only by their STEC prediction error.
+- H4: ML methods such as RayMLP, GNN, and set-to-query models should be
+  evaluated by their VTEC conversion error, not only by their STEC prediction
+  error.
 - H5: Random sample splits can overestimate performance; time, station, and PRN
   holdout splits are required to test generalization.
+- H6: Local IPP context matters. IPP-nearby ray pairs and set-to-query models
+  should be preferred over identity-only slant training when the goal is
+  STEC-to-VTEC conversion.
 
 ## Required Datasets
 
@@ -54,7 +58,8 @@ the means; improved VTEC conversion is the scientific endpoint.
    recorded.
 3. IRI-backed simulation dataset with documented reference VTEC and simulated
    ray-wise STEC labels.
-4. RayMLP or another ML STEC model trained in the simulation setting.
+4. Ray-wise ML STEC model trained in the simulation setting, with IPP-nearby
+   and set-to-query routes prioritized.
 5. Main comparison in VTEC space: SLM conversion error versus ML-assisted
    STEC-to-VTEC conversion error.
 6. Strict evaluation: random split, time split, station holdout, PRN holdout,
@@ -65,7 +70,7 @@ the means; improved VTEC conversion is the scientific endpoint.
 
 ## Current Scope
 
-The current implemented quick test builds one day:
+The implemented quick test builds one day:
 
 ```text
 Date: 2024-05-05
@@ -74,7 +79,7 @@ Resolution: 15 min
 Output: datasets/processed/raystec_china_20240505.parquet
 ```
 
-The next mainline output should be:
+The SLM baseline output is:
 
 ```text
 datasets/processed/rayvtec_china_20240505_slm.parquet
@@ -91,6 +96,31 @@ IRI_SIMULATION_SCHEMA.md
 It specifies `stec_iri_ray` as the full receiver-satellite ray integral,
 `vtec_iri_ref` as the IPP vertical reference, and
 `vtec_slm_from_iri_stec` as the classical SLM conversion of simulated STEC.
+
+Current single-epoch UT05:00 modeling status:
+
+| Route | Status | Main conclusion |
+| --- | --- | --- |
+| Identity-only RayMLP | Diagnostic only | Fits slant STEC but fails VTEC conversion because the vertical query is out of distribution. |
+| All-to-all RayMLP pairs | Tested | Better than identity-only but worse than local filtering. |
+| IPP-nearby RayMLP pairs | Active baseline | 200 km filtering reaches near-SLM VTEC accuracy with far fewer pairs. |
+| RayMLP source-ratio pairs | Current leading pure-ML route | Nearby200, 100ep trains target/source STEC ratio and reduces UT05:00 random-split VTEC RMSE from 2.44 to 2.13 TECU. |
+| Low-elevation gated hybrid20 | Current recommended conversion route | Uses source-ratio RayMLP below 20 deg only when `vtec_ray_mlp < vtec_slm`; improves all current one-day random/station/time/PRN checks. |
+| Low-elevation hybrid30 | Random-split diagnostic | Best UT05:00 random-split RMSE is 1.99 TECU, but the 20-30 deg bin can degrade stricter splits. |
+| Set-to-query model | Secondary route | Nearby200, sigma100, 100ep slightly surpasses SLM on UT05:00 random split; strict splits still need testing. |
+| FNN/GNN notebook ports | Diagnostics | Useful implementation checks, but not current leading routes. |
+
+Current strict split summary for RayMLP source-ratio plus gated hybrid20:
+
+| Split | SLM RMSE | Pure RayMLP RMSE | Hybrid20 all | Hybrid20 gated | Interpretation |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Random UT05:00 key split | 2.44 | 2.13 | 2.10 | 2.10 | Improves SLM. |
+| Station holdout UT05:00 | 2.60 | 2.97 | 1.95 | 1.89 | Improves SLM despite pure RayMLP degradation. |
+| Time holdout UT05:00 smoke | 2.50 | 3.92 | 1.94 | 1.94 | Improves SLM despite pure RayMLP degradation. |
+| PRN holdout UT05:00 seed 42 | 3.14 | 5.39 | 3.40 | 2.91 | Gating fixes the all-constellation failure. |
+| PRN holdout UT05:00 seed 7 | 2.97 | 2.41 | 1.90 | 1.87 | Gating preserves the gain. |
+| PRN holdout UT05:00 seed 123 | 2.15 | 2.90 | 2.19 | 1.77 | Gating beats a strong SLM split. |
+
 
 ## VTEC-Space Metrics
 
@@ -109,21 +139,21 @@ ML-assisted conversion can be evaluated in either of three table forms:
 
 - a model-produced VTEC column, compared directly with `vtec_iri_ref`;
 - a model-produced STEC column, converted to VTEC with
-  `VTEC_ml = STEC_ml / slm_mapping_factor_iri`.
-- the current RayMLP simulation route, where the network is trained only on
-  simulated slant-ray STEC labels and then queried with a vertical special-ray
-  geometry for VTEC conversion.
+  `VTEC_ml = STEC_ml / slm_mapping_factor_iri`;
+- a ray-wise STEC model queried with vertical special-ray geometry, then used to
+  form a STEC-to-VTEC conversion ratio.
 
 Improvements are reported as deltas and percentage reductions relative to the
 SLM baseline; negative `delta_rmse_vs_slm_tecu` or positive
 `rmse_reduction_vs_slm_pct` means improvement.
 
-## RayMLP Simulation Route
+## ML Simulation Routes
 
-The mainline RayMLP training entry point is:
+The active ML training entry points are:
 
 ```text
 python -m src.train_ray_mlp_simulation
+python -m src.train_set_mlp
 ```
 
 It does not learn a VTEC residual, and `vtec_iri_ref` must not be used as a
@@ -145,6 +175,10 @@ vtec_ray_mlp = source_STEC * vtec_ray_mlp_direct / stec_ray_mlp
 `vtec_iri_ref` is used only after training to evaluate that converted
 prediction.
 
+The identity-only RayMLP setup is now treated as a failed diagnostic route. The
+active routes are IPP-nearby pair learning and set-to-query learning, because
+both expose the model to non-identity source-to-target ray relationships.
+
 ## Legacy Off-mainline Work
 
 The previously implemented `stec_slm`, direct STEC prediction, and
@@ -162,4 +196,6 @@ may be useful later, but they do not define the current research question.
 - Hidden hard-coded paths.
 - IRI simulation assumptions that are not explicitly documented.
 - Hidden assumptions in the single-layer shell height or mapping function.
+- Feature convention mismatches, especially azimuth range differences between
+  legacy notebooks and parquet columns.
 - Overstating causality from regression performance.

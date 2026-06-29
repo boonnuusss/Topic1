@@ -166,6 +166,80 @@ row keys:
   -Device cpu
 ```
 
+For the current pair-learning route, use IPP-nearby ray pairs:
+
+```powershell
+.\scripts\run_nearby_pairs.ps1 `
+  -RunName ray_mlp_sim_0500_nearby200_e100 `
+  -NearbyKm 200 `
+  -Epochs 100 `
+  -Device cpu
+```
+
+Use `run_nearby_sweep.ps1` for the 100/200/400 km radius sweep. For the current best RayMLP route, pass `--target-mode source_ratio` to the Python entry point.
+
+## Hybrid Low-Elevation VTEC
+
+Build the current low-elevation ML / high-elevation SLM hybrid from a RayMLP
+source-ratio prediction table:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\build_hybrid_vtec.ps1 `
+  -InputPath results\tables\ray_mlp_sim_0500_nearby200_e100_source_ratio_predictions.parquet `
+  -OutputPath results\tables\ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid20_ml_lt_slm.parquet `
+  -RunName ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid20_ml_lt_slm `
+  -ElevationThresholdDeg 20 `
+  -MlMustLowerSlm
+```
+
+Equivalent Python command:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.hybrid_vtec `
+  --input results\tables\ray_mlp_sim_0500_nearby200_e100_source_ratio_predictions.parquet `
+  --output results\tables\ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid20_ml_lt_slm.parquet `
+  --run-name ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid20_ml_lt_slm `
+  --elevation-threshold-deg 20 `
+  --ml-must-lower-slm
+```
+
+The default rule is conservative: use ML only below 20 deg, where the
+low-elevation SLM path-mapping error is largest, and keep SLM elsewhere.
+Add `-MlMustLowerSlm` or `--ml-must-lower-slm` for the current
+recommended robustness gate. `-MlConstellations GPS` remains available for
+constellation-filter diagnostics.
+
+## Set-to-Query Simulation Training
+
+Train the set-to-query model with nearby observable rays:
+
+```powershell
+cd E:\Scientific_Research\work_2026\STEC_ML\Topic1
+.\scripts\run_set_mlp.ps1 `
+  -RunName set_mlp_0500_nearby200_s100_e100 `
+  -NearbyKm 200 `
+  -SpatialSigmaKm 100 `
+  -Epochs 100 `
+  -Device cpu
+```
+
+Equivalent Python command:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_mlp_0500_nearby200_s100_e100 `
+  --nearby-km 200 `
+  --spatial-sigma-km 100 `
+  --epochs 100 `
+  --device cpu
+```
+
+Main output columns are `stec_set_mlp`, `vtec_set_mlp_direct`,
+`set_mlp_conversion_ratio`, and final converted `vtec_set_mlp`. Use
+`run_set_mlp_sweep.ps1` for the nearby radius and spatial-sigma sweep.
+
 ## FNN Simulation Training
 
 Train the compact FNN adapted from

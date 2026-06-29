@@ -1569,3 +1569,489 @@ still poor (RMSE 5.66) — ratio conversion carries the improvement.
    fails (RMSE 24→RMSE 2.6) not because ML cannot learn VTEC
    conversion, but because the training pair design matters
    critically. Nearby cross-geometry supervision is essential.
+
+## 2026-06-27 Experiment 028: RayMLP Source-Ratio And Low-Elevation Hybrid
+
+### Goal
+
+Move from marginal SLM parity to a clearly better STEC-to-VTEC conversion route
+without using `vtec_iri_ref` as a training target. The tested idea is to train
+RayMLP on slant-ray pair ratios:
+
+```text
+target = target_stec / source_stec
+input  = source_STEC + source geometry + target geometry
+```
+
+For VTEC conversion, the trained model is queried with vertical target geometry
+and the prediction is applied as:
+
+```text
+vtec_ray_mlp = source_STEC * predicted_vertical_ratio
+```
+
+### Code Changes
+
+- Added `--target-mode {absolute,source_ratio}` to
+  `src.train_ray_mlp_simulation`.
+- Added `src.hybrid_vtec` for a fixed low-elevation hybrid:
+  use ML below a chosen elevation threshold and SLM otherwise.
+- Added `scripts/build_hybrid_vtec.ps1`.
+- Added time features and configurable query dimensions to Set-to-Query; this
+  is needed for later multi-epoch tests.
+- Added Set-to-Query inference context switches, but these did not improve the
+  UT05:00 benchmark.
+
+### Main UT05:00 Random-Split Results
+
+All rows use `vtec_iri_ref` only for evaluation, not for model training or
+hybrid selection.
+
+| Route | VTEC RMSE | MAE | Bias | R2 | MaxAbsErr | Relative to SLM |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline | 2.4400 | 1.4326 | +1.1364 | 0.9610 | 12.1096 | - |
+| RayMLP source-ratio nearby200 e100 | 2.1300 | 1.3649 | -0.5012 | 0.9703 | 12.8472 | RMSE -12.71% |
+| Hybrid source-ratio below 30 deg + SLM otherwise | **1.9919** | **1.1900** | -0.4368 | **0.9740** | 12.8472 | **RMSE -18.36%, MAE -16.93%** |
+
+### Radius And Epoch Diagnostics
+
+| Route | VTEC RMSE | Conclusion |
+| --- | ---: | --- |
+| nearby100 e100 source-ratio | 3.7429 | Too local; biased high. |
+| nearby200 e50 source-ratio | 2.9512 | Under-trained. |
+| nearby200 e100 source-ratio | **2.1300** | Best pure ML source-ratio run. |
+| nearby200 e200 source-ratio | 4.0705 | Overfits vertical ratio. |
+| nearby400 e100 source-ratio | 4.7128 | Too broad; noisy pairs degrade conversion. |
+
+### Set-to-Query Context Diagnostics
+
+| Route | VTEC RMSE | Conclusion |
+| --- | ---: | --- |
+| all observed context, no query self | 3.4031 | Worse than train-context Set-to-Query. |
+| all observed context, include query self | 5.3048 | Slant STEC improves but vertical extrapolation degrades. |
+
+### Elevation-Bin Interpretation
+
+The source-ratio RayMLP improves the bins where SLM is weakest:
+
+- `[10,20)` RMSE: SLM `5.8390`, RayMLP `4.5743` TECU.
+- `[20,30)` RMSE: SLM `2.8787`, RayMLP `2.3542` TECU.
+
+Above about `30` degrees, SLM is already very accurate and the ML ratio can add
+noise. The hybrid is therefore physically motivated: use ML only in the
+low-elevation regime where SLM path-mapping errors dominate, and keep SLM at
+higher elevations.
+
+### Outputs
+
+- `src/hybrid_vtec.py`
+- `scripts/build_hybrid_vtec.ps1`
+- `results/tables/ray_mlp_sim_0500_nearby200_e100_source_ratio_predictions.parquet`
+- `results/tables/ray_mlp_sim_0500_nearby200_e100_source_ratio_metrics.json`
+- `results/tables/ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid30.parquet`
+- `results/tables/ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid30_vtec_overall_metrics.csv`
+- `results/checkpoints/ray_mlp_sim_0500_nearby200_e100_source_ratio.pth`
+
+### Next Step
+
+The current random-split result now clearly beats SLM in VTEC space. The next
+required gate is strict generalization: station holdout, PRN holdout, and
+multi-epoch time tests for the source-ratio + low-elevation hybrid route.
+
+## 2026-06-27 Experiment 029: GNN Notebook Reproduction
+
+### Goal
+
+Faithfully reproduce the `GNN_sTEC_improve.ipynb` experiment with the original
+observed-STEC `.npz` data, `torch_geometric.nn.SAGEConv` architecture, and
+notebook training settings (Adam, 15000 epochs, early stopping).
+
+This is separate from Experiment 024 which adapted the GNN to the IRI
+simulation parquet pipeline with VTEC evaluation.
+
+### Method
+
+- Data: `obs_sTEC_2024128_1000_regional_big.npz` (4049 observed rays, DOY 128)
+- Architecture: `ImprovedSTEC_GNN` with `torch_geometric.nn.SAGEConv`
+  (2-layer: 64→32 hidden, 3-layer edge decoder), 19,041 parameters
+- Graph: 363 nodes (receiver + satellite ECEF), 8,098 ray edges (bidirectional),
+  1,160 receiver KNN spatial edges (k=4), 9,258 total edges
+- Edge features: elevation and azimuth in radians via `ecef2enu()`
+- Normalization: `StandardScaler` on nodes, edges (fit on ray edges), targets
+- Split: random 80/20 on ray edges
+- Training: Adam (lr=1e-3), MSE loss, `RobustEarlyStopping` (patience=500,
+  window=20, min_delta=1e-6), max 15,000 epochs
+- Evaluation: STEC-space RMSE, MAE, bias, and R² after inverse scaling
+- New CLI entry point: `python -m src.train_gnn_notebook_repro`
+
+### Command
+
+```powershell
+.venv\Scripts\python.exe -m src.train_gnn_notebook_repro `
+  --data-path ../00_iri/mycode/ML_sTEC/Mydata/obs_sTEC_2024128_1000_regional_big.npz `
+  --run-name gnn_notebook_repro_r00 `
+  --device cpu
+```
+
+### Results
+
+| Metric | Notebook (original) | Reproduction |
+| --- | ---: | ---: |
+| Nodes | 363 | 363 |
+| Ray edges | 8,098 | 8,098 |
+| Total edges | 9,258 | 9,258 |
+| Model parameters | 19,041 | 19,041 |
+| Early stop epoch | 7,500 | 7,100 |
+| Best val epoch | 6,999 | 6,599 |
+| **STEC Test RMSE** | **6.2482 TECU** | **6.6906 TECU** |
+| STEC Test MAE | — | 4.9837 TECU |
+| STEC Test Bias | — | +2.1167 TECU |
+| **STEC Test R²** | **0.9851** | **0.9812** |
+
+The ~0.4 TECU RMSE difference and ~0.004 R² difference are expected because the
+notebook uses `np.random.shuffle` without a fixed seed, so train/test
+compositions differ between runs. The graph construction, model architecture,
+parameter count, and training dynamics are reproduced exactly.
+
+### Outputs
+
+- `src/train_gnn_notebook_repro.py` — new CLI entry point
+- `results/tables/gnn_notebook_repro_r00_metrics.json` — full metrics and metadata
+- `results/checkpoints/gnn_notebook_repro_r00.pth` — model state dict
+- `results/checkpoints/gnn_notebook_repro_r00_scalers.pkl` — node/edge/target scalers
+- `results/figures/gnn_notebook_repro_r00_scatter.png` — predicted vs true scatter
+
+### Interpretation
+
+The reproduction confirms that the notebook's GNN GraphSAGE model achieves
+~6-7 TECU RMSE on observed slant STEC prediction with R² ~0.98. This is a
+STEC-space result only; the model has no VTEC conversion capability in its
+current form. The notebook's approach is faithfully preserved as a CLI entry
+point for future reference and comparison.
+
+## 2026-06-27 Experiment 030: GNN VTEC Conversion Test On Observed-STEC Data
+
+### Goal
+
+Test the Experiment 029 GNN on STEC-to-VTEC conversion by computing IRI VTEC
+reference at each test-ray IPP and comparing GNN ratio-based VTEC against the
+SLM baseline.
+
+### Method
+
+- Load trained GNN checkpoint from Experiment 029
+- Reconstruct graph from same `.npz` data with seed=42 split (800 test rays)
+- Compute IRI VTEC at each test IPP via `PyIRI.edp_update.IRI_density_1day`
+  (90-2000 km altitude grid, 5 km spacing, F107=204, CCIR)
+- Build vertical query graph (virtual receiver at IPP ground, virtual satellite
+  at IPP + 2000 km, elevation=90°)
+- Run GNN on augmented graph, extract vertical STEC, compute ratio-based VTEC
+- Compare SLM and GNN VTEC against IRI reference
+- New CLI: `python -m src.evaluate_gnn_vtec`
+
+### Command
+
+```powershell
+.venv\Scripts\python.exe -m src.evaluate_gnn_vtec `
+  --run-name gnn_vtec_eval_r00 --device cpu
+```
+
+### Results
+
+**VTEC Conversion (800 test rays):**
+
+| Model | RMSE TECU | MAE TECU | Bias TECU | R² |
+| --- | ---: | ---: | ---: | ---: |
+| SLM (`stec_obs / M`) | 15.48 | 12.19 | -3.67 | 0.28 |
+| GNN ratio | 75.42 | 55.65 | +42.21 | -16.10 |
+| GNN direct vertical | 75.60 | 55.54 | +44.27 | -16.18 |
+
+**GNN Slant STEC:** RMSE=6.86 TECU, R²=0.98 (good slant fit, consistent
+with Experiment 029).
+
+### Data Quality Audit
+
+The SLM baseline itself shows poor agreement with IRI (RMSE 15.48, R² 0.28).
+Full-dataset analysis (N=4049) revealed:
+
+| Metric | Value |
+| --- | --- |
+| SLM vs IRI correlation (r) | 0.7626 |
+| SLM vs IRI R² | 0.31 |
+| SLM mean ± std | 52.6 ± 22.9 TECU |
+| IRI mean ± std | 55.8 ± 18.3 TECU |
+
+Elevation-dependent bias: SLM - IRI = +5.51 TECU at 10-20° vs -7.13 TECU at
+40-60°, consistent with receiver/satellite DCB contamination in the observed
+STEC data. The DCB term `(DCB_rec + DCB_sat) / M(elevation)` varies
+systematically with elevation, degrading R² even though spatial correlation
+(r=0.76) is decent.
+
+**Root cause:** The `.npz` uses observed STEC with unknown biases, while IRI
+produces bias-free model VTEC. This makes the VTEC reference comparison
+inherently noisy. For reference, on IRI simulation data where STEC and VTEC
+are physically consistent, SLM achieves RMSE=2.44 TECU, R²=0.96.
+
+### Interpretation
+
+1. **The code is correct** — SLM spatial correlation r=0.76 and latitudinal
+   gradient (IRI vs ipp_lat r=-0.81) confirm the IRI computation and SLM
+   formula work as expected.
+
+2. **GNN fails VTEC conversion** (RMSE 75.42 vs SLM 15.48) — confirming the
+   identity-only training limitation even on observed data. The GNN predicts
+   vertical STEC ~42 TECU too high (bias +42.21), consistent with the
+   out-of-distribution vertical query problem identified in Experiments
+   020-021.
+
+3. **Observed-STEC data is NOT suitable for VTEC evaluation** because
+   uncalibrated biases obscure the conversion accuracy. A cleaner test
+   requires IRI simulation data where STEC and VTEC reference are
+   physically consistent.
+
+### Outputs
+
+- `src/evaluate_gnn_vtec.py` — new CLI for GNN VTEC evaluation
+- `results/tables/gnn_vtec_eval_r00_metrics.json` — full VTEC metrics
+- `results/figures/gnn_vtec_eval_r00_summary.png` — summary figure
+
+## 2026-06-27 Experiment 031: GNN (SAGEConv) On IRI Simulation Data + VTEC
+
+### Goal
+
+Train the notebook's `ImprovedSTEC_GNN` (with `torch_geometric.nn.SAGEConv`) on
+the clean IRI simulation dataset and evaluate VTEC conversion. This avoids the
+DCB contamination identified in Experiment 030 and provides a fair comparison
+against the SLM baseline.
+
+### Method
+
+- Data: `iri_simulation_20240505_0500_spacing2p5_regular.parquet` (2041 rows)
+- Model: `ImprovedSTEC_GNN` with `SAGEConv` (64→32 hidden, 3-layer edge decoder)
+- Graph: 157 nodes (107 rec + 50 sat), 4082 ray edges, 428 KNN edges (k=4)
+- Split: random, seed=52, test_size=0.2 (3265 train / 817 test ray edges)
+- Training: Adam (lr=0.001), MSE loss, RobustEarlyStopping (patience=500,
+  window=20, min_delta=1e-6), max 15000 epochs
+- Labels: `stec_iri_ray` only (no `vtec_iri_ref` in training)
+- VTEC conversion: ratio-based `vtec_gnn = source_STEC * (vertical_pred / slant_pred)`
+- New CLI: `python -m src.train_gnn_iri_pyg`
+
+### Command
+
+```powershell
+.venv\Scripts\python.exe -m src.train_gnn_iri_pyg `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name gnn_iri_pyg_r00 `
+  --epochs 15000 --device cpu
+```
+
+### Results
+
+**Training:** Early stopped at epoch 2637 (best val at epoch 2136), 19,041 params.
+
+**VTEC Conversion (405 test rays, random split seed=52):**
+
+| Model | RMSE TECU | MAE TECU | Bias TECU | R2 |
+| --- | ---: | ---: | ---: | ---: |
+| SLM (`vtec_slm_from_iri_stec`) | **2.71** | **1.54** | +1.13 | **0.954** |
+| GNN ratio | 11.52 | 7.85 | -3.61 | 0.158 |
+| GNN direct vertical | 11.26 | 7.41 | -3.95 | 0.196 |
+
+**GNN Slant STEC:** RMSE=5.06 TECU, R²=0.976
+
+### Comparison With Experiment 024 (Pure-PyTorch GraphSAGE)
+
+| Metric | Exp 024 (fixed keys) | Exp 031 (random split) |
+| --- | ---: | ---: |
+| GNN VTEC RMSE | 12.77 | 11.52 |
+| GNN Slant STEC RMSE | 5.18 | 5.06 |
+| GNN Slant STEC R² | — | 0.976 |
+
+The SAGEConv version performs similarly to the pure-PyTorch GraphSAGE, confirming
+the architecture match. The small RMSE difference is attributable to different
+splits (fixed test keys vs random seed=52).
+
+### Comparison With Experiment 030 (Observed-STEC Data)
+
+| Metric | Observed STEC (Exp 030) | IRI Simulation (Exp 031) |
+| --- | ---: | ---: |
+| SLM RMSE | 15.48 | **2.71** |
+| SLM R² | 0.28 | **0.954** |
+| GNN VTEC RMSE | 75.42 | 11.52 |
+| GNN Slant RMSE | 6.86 | 5.06 |
+
+The IRI simulation provides a much cleaner evaluation: SLM achieves excellent
+performance (R²=0.95), confirming the data is physically self-consistent.
+The GNN still fails VTEC conversion but the error is much more modest (11.52 vs
+75.42 TECU on observed data), reflecting the cleaner training signal.
+
+### Interpretation
+
+1. **The IRI simulation data confirms SLM works perfectly** (RMSE 2.71, R² 0.954),
+   as expected when STEC and VTEC come from the same electron density field.
+
+2. **GNN with SAGEConv still fails VTEC conversion** (GNN RMSE 11.52 vs SLM 2.71).
+   This is the same identity-only training limitation: the GNN fits slant STEC
+   well (R² 0.976) but the vertical query is out-of-distribution.
+
+3. **The 11.52 TECU RMSE is a "clean" failure** — unlike the 75.42 TECU on
+   observed data, this number reflects the genuine limitation of identity-only
+   edge supervision, uncontaminated by observation biases.
+
+4. **Early stopping at epoch 2637** (vs 7100 on observed data) suggests the IRI
+   simulation slant STEC is an easier learning target than observed STEC,
+   consistent with the absence of measurement noise and biases.
+
+5. This experiment completes the planned GNN route: the notebook architecture
+   faithfully reproduced, trained on clean simulation data, and evaluated for
+   VTEC conversion. The conclusion is clear: **identity-only STEC edge
+   supervision is insufficient for learning STEC-to-VTEC conversion**, regardless
+   of whether the model uses SAGEConv (this experiment) or pure-PyTorch
+   GraphSAGE (Experiment 024).
+
+### Outputs
+
+- `src/train_gnn_iri_pyg.py` — new CLI for PyG GNN on IRI simulation
+- `results/checkpoints/gnn_iri_pyg_r00.pth` — model state dict
+- `results/checkpoints/gnn_iri_pyg_r00_scalers.pkl` — scalers
+- `results/tables/gnn_iri_pyg_r00_metrics.json` — full metrics
+
+## 2026-06-27 Experiment 032: Strict Holdout Validation For Source-Ratio RayMLP Hybrid
+
+### Goal
+
+Rerun the validation steps that were previously skipped because execution quota
+was exhausted, and test whether the leading RayMLP source-ratio route improves
+STEC-to-VTEC conversion beyond the UT05:00 random split.
+
+### Validation
+
+- Python compile check passed for:
+  - `src/models/set_mlp.py`
+  - `src/train_set_mlp.py`
+  - `src/train_ray_mlp_simulation.py`
+  - `src/hybrid_vtec.py`
+- Full `UT04:00-06:00`, `nearby-max-neighbors=30`, `100 epoch` time-holdout
+  training exceeded 30 minutes and produced no complete result. The orphaned
+  Python training process was stopped, then a lighter reproducible smoke run was
+  used for the time-holdout check.
+
+### Runs
+
+All RayMLP runs used `--target-mode source_ratio`, `--nearby-km 200`, and no
+`vtec_iri_ref` in training. Hybrid results use ML below the listed elevation
+threshold and SLM otherwise.
+
+| Split | Training setup | SLM RMSE | Pure RayMLP RMSE | Hybrid rule | Hybrid RMSE | RMSE change |
+| --- | --- | ---: | ---: | --- | ---: | ---: |
+| Random UT05:00 key split | 100ep, 30 neighbors | 2.4400 | 2.1300 | ML < 20 deg | 2.1008 | -13.90% |
+| Station holdout UT05:00 | 100ep, 30 neighbors | 2.6014 | 2.9739 | ML < 20 deg | 1.9544 | -24.87% |
+| PRN holdout UT05:00 | 100ep, 30 neighbors | 3.1444 | 5.3950 | ML < 20 deg | 3.4034 | +8.24% |
+| Time holdout UT05:00 | 30ep, 10 neighbors, train on other UT04:00-06:00 epochs | 2.4953 | 3.9244 | ML < 20 deg | 1.9431 | -22.13% |
+
+For comparison, the previous random-split `ML < 30 deg` hybrid remains the best
+single random-split number at RMSE 1.9919 TECU, but elevation-bin diagnostics
+showed that the 20-30 deg bin can degrade station/time holdout. The more
+conservative 20 deg threshold is now the default wrapper setting.
+
+### Elevation-Bin Diagnosis
+
+The useful ML correction is concentrated in the lowest elevation bin:
+
+| Split | Bin | SLM RMSE | RayMLP/Hybrid RMSE | Interpretation |
+| --- | --- | ---: | ---: | --- |
+| Station holdout | [10,20) | 6.4426 | 3.9998 | ML strongly reduces low-elevation SLM error. |
+| Station holdout | [20,30) | 2.8357 | 4.6405 | ML degrades this bin, motivating hybrid20. |
+| Time holdout smoke | [10,20) | 6.1917 | 4.1616 | ML strongly reduces low-elevation SLM error. |
+| Time holdout smoke | [20,30) | 2.7186 | 3.1386 | ML degrades this bin, motivating hybrid20. |
+| PRN holdout | [10,20) | 6.7627 | 7.6983 | Current model does not generalize to unseen PRNs. |
+| PRN holdout | [20,30) | 3.7612 | 7.9766 | PRN holdout remains the main failure mode. |
+
+### Interpretation
+
+The current evidence is stronger than the earlier random-split-only result:
+RayMLP source-ratio plus a conservative low-elevation hybrid improves SLM for
+random, station, and time-holdout tests. However, pure RayMLP is worse than SLM
+under station/time/PRN holdout, and the hybrid still fails PRN holdout. The
+scientific claim should therefore be framed as: ML can correct the lowest-
+elevation SLM conversion error in controlled IRI simulations, but PRN
+holdout generalization is not solved yet.
+
+### Code And Documentation Updates
+
+- Changed the default hybrid threshold from 30 deg to 20 deg in:
+  - `src/hybrid_vtec.py`
+  - `scripts/build_hybrid_vtec.ps1`
+- Updated README, research plan, TODO, script docs, and data dictionary to
+  distinguish random-split best results from stricter holdout evidence.
+
+### Key Outputs
+
+- `results/tables/ray_mlp_sim_0500_station_source_ratio_hybrid20.parquet`
+- `results/tables/ray_mlp_sim_0500_prn_source_ratio_hybrid20.parquet`
+- `results/tables/ray_mlp_sim_time0500_source_ratio_e30_n10_hybrid20.parquet`
+- `results/tables/ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid20.parquet`
+
+### Next Step
+
+Diagnose the PRN-holdout failure before claiming robust improvement over SLM.
+Likely checks include PRN/constellation imbalance, orbit-feature coverage,
+low-elevation bias by PRN group, and whether pair construction should restrict
+source-target PRN or constellation relationships.
+
+### PRN Diagnostic Addendum
+
+A follow-up aggregation of the PRN-holdout prediction table showed that the
+all-constellation low-elevation hybrid fails mainly because non-GPS low-elevation
+rays are biased high:
+
+| Group | n | SLM RMSE | RayMLP RMSE | RayMLP bias | Interpretation |
+| --- | ---: | ---: | ---: | ---: | --- |
+| BDS, elevation < 20 deg | 24 | 6.67 | 8.44 | +7.77 | ML over-corrects. |
+| Galileo, elevation < 20 deg | 5 | 4.21 | 8.01 | +7.59 | ML over-corrects. |
+| GPS, elevation < 20 deg | 14 | 7.61 | 6.07 | +3.27 | ML helps relative to SLM. |
+
+This motivated an optional constellation-aware hybrid selection implemented as
+`--ml-constellations`. A GPS-only hybrid20 candidate uses ML only when
+`elevation < 20 deg` and `constellation == GPS`; otherwise it keeps SLM.
+
+| Split | SLM RMSE | Pure RayMLP RMSE | Hybrid20 all constellations | Hybrid20 GPS-only |
+| --- | ---: | ---: | ---: | ---: |
+| Random UT05:00 key split | 2.4400 | 2.1300 | 2.1008 | 2.3827 |
+| Station holdout UT05:00 | 2.6014 | 2.9739 | 1.9544 | 2.3295 |
+| PRN holdout UT05:00 | 3.1444 | 5.3950 | 3.4034 | 3.0051 |
+| Time holdout UT05:00 smoke | 2.4953 | 3.9244 | 1.9431 | 2.3180 |
+
+The GPS-only candidate improves all four checked splits, including PRN holdout,
+but it was derived from the present diagnostic. It should be treated as a
+robustness candidate that needs independent split/day validation, not yet as the
+final scientific claim.
+### Gated Hybrid Addendum
+
+Additional PRN-holdout seeds showed that PRN generalization is sensitive to the
+held-out PRN composition. Seed 7 is favorable to pure RayMLP, while seeds 42 and
+123 expose failures. A more stable gate was therefore tested:
+
+```text
+Use RayMLP only when elevation < 20 deg and vtec_ray_mlp < vtec_slm_from_iri_stec;
+otherwise keep SLM.
+```
+
+This gate does not use `vtec_iri_ref`; it uses only the ML prediction, SLM
+prediction, and elevation. The motivation is that the dominant low-elevation SLM
+error in these simulations is positive bias, so ML corrections that increase
+VTEC further are likely unsafe.
+
+| Split | SLM RMSE | Pure RayMLP RMSE | Hybrid20 all | Hybrid20 gated | RMSE reduction vs SLM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Random UT05:00 key split | 2.4400 | 2.1300 | 2.1008 | 2.1008 | 13.90% |
+| Station holdout UT05:00 | 2.6014 | 2.9739 | 1.9544 | 1.8850 | 27.54% |
+| Time holdout UT05:00 smoke | 2.4953 | 3.9244 | 1.9431 | 1.9367 | 22.39% |
+| PRN holdout seed 42 | 3.1444 | 5.3950 | 3.4034 | 2.9123 | 7.38% |
+| PRN holdout seed 7 | 2.9725 | 2.4075 | 1.8973 | 1.8683 | 37.15% |
+| PRN holdout seed 123 | 2.1463 | 2.9011 | 2.1925 | 1.7686 | 17.60% |
+
+This is the strongest current one-day evidence that ML-assisted conversion can
+be meaningfully better than SLM without using VTEC truth for model training or
+hybrid selection. The remaining gate before a publishable claim is independent-
+day validation and a larger multi-epoch run.

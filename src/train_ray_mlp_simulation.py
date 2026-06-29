@@ -589,6 +589,22 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
         feature_cols = feature_columns_from_pairs(train_pairs)
         x_train = train_pairs.loc[:, feature_cols]
         y_train = train_pairs["target_stec"]
+        if args.target_mode == "source_ratio":
+            source_for_pairs = train_pairs["source_stec"].to_numpy(float)
+            target_for_pairs = train_pairs["target_stec"].to_numpy(float)
+            valid_ratio = (
+                np.isfinite(source_for_pairs)
+                & np.isfinite(target_for_pairs)
+                & (np.abs(source_for_pairs) > 1e-12)
+            )
+            train_pairs = train_pairs.loc[valid_ratio].copy()
+            train_pairs["target_stec"] = (
+                target_for_pairs[valid_ratio] / source_for_pairs[valid_ratio]
+            )
+            if train_pairs.empty:
+                raise ValueError("No finite source-ratio training pairs were created.")
+            x_train = train_pairs.loc[:, feature_cols]
+            y_train = train_pairs["target_stec"]
         (
             x_train_scaled,
             y_train_scaled,
@@ -598,6 +614,16 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
             y_scaler,
         ) = standardize_xy(x_train, y_train, x_train)
         pair_kind = "source_slant_to_same_slant"
+
+    if use_numpy_pairs and args.target_mode == "source_ratio":
+        source_for_pairs = X_train[:, -1].astype(np.float64)
+        valid_ratio = (
+            np.isfinite(source_for_pairs)
+            & np.isfinite(y_train)
+            & (np.abs(source_for_pairs) > 1e-12)
+        )
+        X_train = X_train[valid_ratio]
+        y_train = y_train[valid_ratio] / source_for_pairs[valid_ratio]
 
     if use_numpy_pairs:
         if len(X_train) < 2:
@@ -687,25 +713,32 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
         device=device,
     )
 
-    # Physical constraint: STEC must be non-negative.
-    vtec_pred = np.maximum(vtec_pred, 0.0)
-    slant_pred = np.maximum(slant_pred, 0.0)
-
     predictions = test_df.copy()
-    predictions["stec_ray_mlp"] = slant_pred
-    predictions["vtec_ray_mlp_direct"] = vtec_pred
-    denominator = predictions["stec_ray_mlp"].to_numpy(float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.divide(
-            predictions["vtec_ray_mlp_direct"].to_numpy(float),
-            denominator,
-            out=np.full(len(predictions), np.nan, dtype=float),
-            where=np.abs(denominator) > 1e-12,
-        )
-    predictions["ray_mlp_conversion_ratio"] = ratio
-    predictions["vtec_ray_mlp"] = (
-        predictions[args.source_stec_column].to_numpy(float) * ratio
-    )
+    source_stec_eval = predictions[args.source_stec_column].to_numpy(float)
+
+    if args.target_mode == "source_ratio":
+        vertical_ratio = np.maximum(vtec_pred, 0.0)
+        slant_ratio = np.maximum(slant_pred, 0.0)
+        predictions["stec_ray_mlp"] = source_stec_eval * slant_ratio
+        predictions["ray_mlp_conversion_ratio"] = vertical_ratio
+        predictions["vtec_ray_mlp_direct"] = source_stec_eval * vertical_ratio
+        predictions["vtec_ray_mlp"] = predictions["vtec_ray_mlp_direct"]
+    else:
+        # Physical constraint: STEC must be non-negative.
+        vtec_pred = np.maximum(vtec_pred, 0.0)
+        slant_pred = np.maximum(slant_pred, 0.0)
+        predictions["stec_ray_mlp"] = slant_pred
+        predictions["vtec_ray_mlp_direct"] = vtec_pred
+        denominator = predictions["stec_ray_mlp"].to_numpy(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.divide(
+                predictions["vtec_ray_mlp_direct"].to_numpy(float),
+                denominator,
+                out=np.full(len(predictions), np.nan, dtype=float),
+                where=np.abs(denominator) > 1e-12,
+            )
+        predictions["ray_mlp_conversion_ratio"] = ratio
+        predictions["vtec_ray_mlp"] = source_stec_eval * ratio
     predictions["vtec_ray_mlp_error_iri"] = (
         predictions["vtec_ray_mlp"] - predictions[args.vtec_target_column]
     )
@@ -788,6 +821,7 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
         "vtec_reference_used_for_inference_features": False,
         "vertical_top_km": float(args.vertical_top_km),
         "training_pair_role": pair_kind,
+        "target_mode": args.target_mode,
         "feature_columns": feature_cols,
         "n_features": int(len(feature_cols)),
         "split": split_metadata,
@@ -807,6 +841,7 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
             "device": str(device),
             "all_pairs": bool(args.all_pairs),
             "nearby_km": float(args.nearby_km),
+            "target_mode": args.target_mode,
         },
         "history": history,
         "metrics": {
@@ -832,6 +867,14 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
             "predictions": str(prediction_path),
         },
     }
+    if args.target_mode == "source_ratio":
+        metadata["conversion_interpretation"] = (
+            "Model is trained on target_STEC/source_STEC ratios from "
+            "IPP-nearby slant-ray pairs. For STEC-to-VTEC conversion, "
+            "the model is queried with vertical target geometry and "
+            "VTEC = source_STEC * predicted_vertical_ratio."
+        )
+
     if vtec_metadata is not None:
         metadata["outputs"]["vtec_metrics"] = vtec_metadata["outputs"]
 
@@ -848,7 +891,7 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
     )
     metrics_json_path = write_json(metadata, table_dir / f"{run_name}_metrics.json")
     summary_rows = [
-        {"subset": "train", "metric_target": "target_stec_pairs", **train_stec_metrics},
+        {"subset": "train", "metric_target": args.target_mode, **train_stec_metrics},
         {
             "subset": "test",
             "metric_target": args.slant_target_column,
@@ -896,6 +939,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", default=DEFAULT_INPUT)
     parser.add_argument("--source-stec-column", default="stec_iri_observable")
+    parser.add_argument("--target-mode", choices=["absolute", "source_ratio"], default="absolute", help="Training target: absolute target STEC or target/source STEC ratio.")
     parser.add_argument("--slant-target-column", default="stec_iri_ray")
     parser.add_argument("--vtec-target-column", default="vtec_iri_ref")
     parser.add_argument("--baseline-vtec-column", default="vtec_slm_from_iri_stec")

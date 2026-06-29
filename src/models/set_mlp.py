@@ -75,14 +75,14 @@ class _MLPBlock(nn.Sequential):
 class QueryEncoder(nn.Module):
     """Encode the target-ray geometry into a 128-d query vector.
 
-    Input:  (B, 16)  — target geometry columns (see TARGET_GEOM_COLS)
+    Input:  (B, in_features)  target geometry/time features
     Output: (B, 128)
     """
 
-    def __init__(self, dropout: float = 0.1):
+    def __init__(self, in_features: int = 16, dropout: float = 0.1):
         super().__init__()
         self.net = nn.Sequential(
-            _MLPBlock(16, 64, dropout),
+            _MLPBlock(in_features, 64, dropout),
             _MLPBlock(64, 128, dropout),
             nn.Linear(128, 128),
         )
@@ -233,10 +233,14 @@ class SetToQueryModel(nn.Module):
         self,
         dropout: float = 0.1,
         spatial_length_scale_km: float = 100.0,
+        n_query_features: int = 16,
         n_obs_features: int = 23,
     ):
         super().__init__()
-        self.query_enc = QueryEncoder(dropout=dropout)
+        self.query_enc = QueryEncoder(
+            in_features=n_query_features,
+            dropout=dropout,
+        )
         self.obs_enc = ObsEncoder(in_features=n_obs_features, dropout=dropout)
         self.cross_attn = SpatialCrossAttention(
             d_model=128,
@@ -248,8 +252,8 @@ class SetToQueryModel(nn.Module):
 
     def forward(
         self,
-        query_geom: torch.Tensor,      # (B, 16)  target ray geometry
-        obs_features: torch.Tensor,    # (B, K, 23)  observed rays
+        query_geom: torch.Tensor,      # (B, Dq) target ray features
+        obs_features: torch.Tensor,    # (B, K, Do) observed rays
         obs_mask: torch.Tensor,        # (B, K)  True = valid observation
         ipp_dist_km: torch.Tensor,     # (B, K)  haversine IPP distances
     ) -> torch.Tensor:

@@ -21,9 +21,13 @@ The current route is:
    `VTEC_slm = STEC_obs / M(elevation)`.
 3. Use IRI-generated background ionosphere fields to run controlled simulation
    experiments with known reference VTEC/STEC relationships.
-4. Train ray-wise ML STEC models, starting with RayMLP/FNN/GNN variants after
-   the simulation labels and SLM baseline are stable.
-5. Compare SLM and ML-assisted STEC-to-VTEC conversion in VTEC space, using
+4. Train ray-wise ML STEC models after the simulation labels and SLM baseline
+   are stable.
+5. Prioritize non-identity ML routes, especially IPP-nearby ray pairs and
+   set-to-query attention models. Identity-only slant supervision is retained
+   only as a diagnostic because it does not reliably learn STEC-to-VTEC
+   conversion.
+6. Compare SLM and ML-assisted STEC-to-VTEC conversion in VTEC space, using
    metrics such as VTEC RMSE, MAE, bias, elevation-bin error, station-bin error,
    PRN-bin error, and spatial residual maps.
 
@@ -162,7 +166,7 @@ The next mainline step is to build an IRI-backed simulation experiment:
 2. Produce ray-wise simulated STEC or reference VTEC labels with known
    provenance.
 3. Apply the SLM conversion baseline to estimate VTEC from STEC.
-4. Train RayMLP-style STEC models under the same simulation setup.
+4. Train ray-wise ML STEC models under the same simulation setup.
 5. Compare SLM and ML-assisted conversion errors against the IRI reference VTEC.
 
 The detailed schema and metadata contract are defined in
@@ -222,15 +226,50 @@ the same mapping factor:
 ## Current ML Simulation Entrypoints
 
 - `python -m src.train_ray_mlp_simulation`: RayMLP ray-transformation STEC
-  model.
+  model, including identity-only diagnostics, all-to-all ray pairs, and
+  IPP-nearby ray pairs.
+- `python -m src.train_set_mlp`: set-to-query STEC model that encodes nearby
+  observed rays and predicts a query ray.
 - `python -m src.train_fnn_simulation`: compact FNN adapted from the local
   `FNN_sTEC_test.ipynb`.
 - `python -m src.train_gnn_simulation`: pure-PyTorch GraphSAGE-style edge
   regressor adapted from `GNN_sTEC_improve.ipynb`.
 
-All three train on simulated slant-ray `stec_iri_ray` labels only. They query a
-vertical special ray after training and are scored against `vtec_iri_ref` only
-in the evaluation step.
+All current ML routes train on simulated slant-ray `stec_iri_ray` labels only.
+They query a vertical special ray after training and are scored against
+`vtec_iri_ref` only in the evaluation step.
+
+Current UT05:00 random-split benchmark status:
+
+| Route | VTEC RMSE | R2 | Notes |
+| --- | ---: | ---: | --- |
+| SLM baseline | 2.44 | 0.961 | Traditional reference |
+| RayMLP source-ratio nearby200, 100ep | 2.13 | 0.970 | Trains target/source STEC ratio; no VTEC reference in training |
+| Hybrid low-elevation ML, threshold 30 deg | 1.99 | 0.974 | Best random-split run, but less conservative under stricter splits |
+| Hybrid gated low-elevation ML, threshold 20 deg | 2.10 | 0.971 | Use ML below 20 deg only when ML VTEC is lower than SLM |
+| Set-to-query nearby200, sigma100, 100ep | 2.40 | 0.962 | Slightly better than SLM in random split |
+| RayMLP nearby-200 absolute STEC, 100ep | 2.55 | 0.958 | Near SLM with filtered ray pairs |
+| RayMLP all-to-all, 20ep | 3.24 | 0.931 | Worse than nearby filtering |
+| RayMLP identity-only, 100ep | 24.08 | -2.80 | Old direction, diagnostic only |
+
+Strict holdout checks currently favor a conservative gated hybrid:
+use RayMLP only when `elevation < 20 deg` and `vtec_ray_mlp < vtec_slm`.
+This gate uses only model/SLM predictions, not `vtec_iri_ref`.
+
+| Split | SLM RMSE | Pure RayMLP RMSE | Hybrid20 all | Hybrid20 gated | Status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Random UT05:00 key split | 2.44 | 2.13 | 2.10 | 2.10 | Improves SLM |
+| Station holdout UT05:00 | 2.60 | 2.97 | 1.95 | 1.89 | Improves SLM |
+| Time holdout UT05:00 from UT04:00-06:00 smoke | 2.50 | 3.92 | 1.94 | 1.94 | Improves SLM |
+| PRN holdout UT05:00, seed 42 | 3.14 | 5.39 | 3.40 | 2.91 | Improves SLM |
+| PRN holdout UT05:00, seed 7 | 2.97 | 2.41 | 1.90 | 1.87 | Improves SLM |
+| PRN holdout UT05:00, seed 123 | 2.15 | 2.90 | 2.19 | 1.77 | Improves SLM |
+
+The present best evidence is therefore not that pure RayMLP replaces SLM.
+Rather, RayMLP can help in the lowest-elevation regime where SLM is weakest,
+while SLM remains preferable elsewhere. The gated hybrid is the current leading
+one-day IRI-simulation route; it still needs independent-day validation before
+being treated as a final scientific result.
 
 For the RayMLP simulation route below, evaluate `vtec_ray_mlp` as the final
 ratio-converted VTEC prediction column. The raw vertical target-ray model output
@@ -270,6 +309,60 @@ with both the original slant target ray and a vertical target ray at the same
 IPP/time. The output table includes `stec_ray_mlp`, `vtec_ray_mlp_direct`,
 `ray_mlp_conversion_ratio`, and the final ratio-converted `vtec_ray_mlp`, which
 is then evaluated by `src.evaluate`.
+
+For the current pair-learning route, prefer IPP-nearby pairs over all-to-all
+pairs. The best current RayMLP route trains a target/source STEC ratio:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_ray_mlp_simulation `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name ray_mlp_sim_0500_nearby200_e100_source_ratio `
+  --nearby-km 200 `
+  --nearby-max-neighbors 30 `
+  --target-mode source_ratio `
+  --epochs 100
+```
+
+A physically constrained hybrid keeps the ML correction only at the lowest
+elevation angles. The current recommended robustness gate also requires the ML
+VTEC estimate to be lower than the SLM estimate:
+
+```powershell
+.\scripts\build_hybrid_vtec.ps1 `
+  -InputPath results\tables\ray_mlp_sim_0500_nearby200_e100_source_ratio_predictions.parquet `
+  -OutputPath results\tables\ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid20_ml_lt_slm.parquet `
+  -RunName ray_mlp_sim_0500_nearby200_e100_source_ratio_hybrid20_ml_lt_slm `
+  -ElevationThresholdDeg 20 `
+  -MlMustLowerSlm
+```
+
+## Set-to-Query Simulation Training
+
+The current best UT05:00 simulation route is:
+
+```powershell
+.\scripts\run_set_mlp.ps1 `
+  -RunName set_mlp_0500_nearby200_s100_e100 `
+  -NearbyKm 200 `
+  -SpatialSigmaKm 100 `
+  -Epochs 100
+```
+
+Equivalent Python entry point:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_mlp_0500_nearby200_s100_e100 `
+  --nearby-km 200 `
+  --spatial-sigma-km 100 `
+  --epochs 100
+```
+
+This route builds one query example per held-out ray, encodes nearby observable
+slant rays, applies spatially biased cross-attention, and predicts the target
+query STEC. The output table includes `stec_set_mlp`,
+`vtec_set_mlp_direct`, `set_mlp_conversion_ratio`, and `vtec_set_mlp`.
 
 ## FNN Simulation Training
 

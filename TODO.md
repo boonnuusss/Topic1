@@ -30,8 +30,20 @@ IRI-backed simulation experiment for ML-assisted conversion.
 - [x] Adapt RayMLP training to the simulation setting.
 - [x] Adapt FNN and GNN notebook-style models to the UT05:00 IRI simulation
   setting for slant STEC training and vertical-query VTEC conversion tests.
-- [ ] Compare SLM conversion and ML-assisted conversion under random, time,
-  station, and PRN splits.
+- [x] Implement and test all-to-all RayMLP pair training.
+- [x] Implement and test IPP-nearby RayMLP pair training.
+- [x] Implement and test RayMLP source-ratio training target for STEC-to-VTEC
+  conversion.
+- [x] Implement and test low-elevation ML / high-elevation SLM hybrid VTEC
+  conversion.
+- [x] Implement and test Set-to-Query training with nearby observation sets.
+- [x] Fix GNN azimuth feature convention to match the legacy notebook.
+- [x] Validate IPP-nearby RayMLP source-ratio plus low-elevation hybrid under
+  random, time, station, and PRN splits.
+- [ ] Validate the gated hybrid20 rule (`elevation < 20 deg` and
+  `vtec_ray_mlp < vtec_slm`) on independent days and larger multi-epoch runs.
+- [ ] Validate leading Set-to-Query configurations under time, station, and PRN
+  holdout splits.
 - [ ] Add paper-quality result figures and tables.
 - [ ] Draft methods section after the SLM and IRI simulation results are stable.
 - [ ] After the one-day benchmark is stable, choose ordinary additional days for
@@ -53,13 +65,15 @@ preserved for reference but are not the current mainline:
 
 ## Highest Priority Next
 
-Compare SLM conversion and ML-assisted conversion under random, time, station,
-and PRN splits. Start with the UT05:00 IRI simulation product, then scale to
-more epochs after runtime and memory behavior are stable.
+Validate the gated hybrid20 rule on independent days. The current best one-day
+IRI-simulation evidence is `elevation < 20 deg` plus `vtec_ray_mlp < vtec_slm`,
+which improves SLM across random, station, time-smoke, and three PRN-holdout
+seeds without using `vtec_iri_ref` for selection. It still needs independent-day
+and larger multi-epoch validation before becoming a main result.
 
 ## Blocked / Needs User Decision
 
 - Need decision on whether to keep `rec_h = 0.0` for all stations or parse
   receiver height from another source.
-- Need design choice for IRI simulation: simple shell-level mapping first, or
-  full ray integration through IRI electron density profiles.
+- Need decision on whether to keep UT05:00 as the primary single-epoch benchmark
+  or move the leading routes to the UT04:00-06:00 multi-epoch simulation next.

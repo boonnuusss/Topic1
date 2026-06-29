@@ -57,6 +57,6 @@ Write-Host ""
 Write-Host "Comparison baselines:" -ForegroundColor Yellow
 Write-Host "  SLM:                         VTEC RMSE 2.44, R2 0.961"
 Write-Host "  set-to-query nearby200-s100-100ep: VTEC RMSE 2.40, R2 0.962"
-Write-Host "  RayMLP nearby-200路50ep:      VTEC RMSE 2.59, R2 0.956"
+Write-Host "  RayMLP nearby-200-50ep:      VTEC RMSE 2.59, R2 0.956"
 
 Pop-Location

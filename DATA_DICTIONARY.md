@@ -245,6 +245,29 @@ vtec_ray_mlp = stec_iri_observable * ray_mlp_conversion_ratio
 | `vtec_ray_mlp_direct_error_iri` | Direct vertical-query diagnostic error, `vtec_ray_mlp_direct - vtec_iri_ref` | TECU |
 | `vtec_ray_mlp_direct_abs_error_iri` | Absolute direct vertical-query diagnostic error | TECU |
 
+When `src.train_ray_mlp_simulation` is run with `--target-mode source_ratio`,
+the network target is `target_stec / source_stec` for slant-ray pairs. In that
+mode `ray_mlp_conversion_ratio` is the predicted vertical/source ratio and
+`vtec_ray_mlp = stec_iri_observable * ray_mlp_conversion_ratio`.
+
+## Hybrid VTEC Columns
+
+These columns are produced by `python -m src.hybrid_vtec`. The current main
+hybrid uses RayMLP source-ratio VTEC below a fixed low-elevation threshold and
+keeps SLM above that threshold. The threshold is recorded in the hybrid metadata;
+the current conservative default is 20 deg. Optional metadata field
+`ml_constellations` records any constellation filter used for ML selection, such
+as `GPS`; `ml_must_lower_slm` records whether ML is allowed only when its VTEC
+estimate is lower than the SLM estimate.
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `vtec_hybrid_lowele_ml` | Hybrid VTEC estimate: ML below the configured elevation threshold, SLM otherwise | TECU |
+| `vtec_hybrid_lowele_ml_use_ml` | Whether the row uses the ML VTEC column | boolean |
+| `vtec_hybrid_lowele_ml_source` | Source rule label for the selected VTEC estimate | string |
+| `vtec_hybrid_lowele_ml_error_iri` | `vtec_hybrid_lowele_ml - vtec_iri_ref` | TECU |
+| `vtec_hybrid_lowele_ml_abs_error_iri` | Absolute hybrid VTEC error | TECU |
+
 ## FNN Simulation Prediction Columns
 
 These columns are produced by `python -m src.train_fnn_simulation`. The FNN is
@@ -271,7 +294,9 @@ positions; ray edges carry elevation and azimuth features. Receiver-receiver
 KNN edges provide spatial message-passing context but do not have STEC labels.
 
 Training uses only simulated slant-ray `stec_iri_ray` labels. `vtec_iri_ref`
-is used only for post-training VTEC-space evaluation.
+is used only for post-training VTEC-space evaluation. The parquet azimuth range
+`[0, 360)` is wrapped to `[-180, 180)` before radians so it matches the legacy
+notebook's `atan2` convention.
 
 | Column | Meaning | Unit / Type |
 | --- | --- | --- |
@@ -283,6 +308,24 @@ is used only for post-training VTEC-space evaluation.
 | `vtec_gnn_abs_error_iri` | Absolute GNN VTEC error | TECU |
 | `vtec_gnn_direct_error_iri` | Direct vertical-query diagnostic error, `vtec_gnn_direct - vtec_iri_ref` | TECU |
 | `vtec_gnn_direct_abs_error_iri` | Absolute direct vertical-query diagnostic error | TECU |
+
+## Set-to-Query Simulation Prediction Columns
+
+These columns are produced by `python -m src.train_set_mlp`. The model encodes a
+variable-size set of nearby observable slant rays and predicts a query ray with
+spatially biased cross-attention. Training labels are simulated slant-ray
+`stec_iri_ray`; `vtec_iri_ref` is used only after training for evaluation.
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `stec_set_mlp` | Set-to-query prediction for the original slant query ray | TECU |
+| `vtec_set_mlp_direct` | Raw set-to-query prediction for the vertical query ray before ratio conversion | TECU |
+| `set_mlp_conversion_ratio` | Model-implied vertical/slant response ratio, `vtec_set_mlp_direct / stec_set_mlp` | unitless |
+| `vtec_set_mlp` | Final set-to-query assisted converted VTEC estimate | TECU |
+| `vtec_set_mlp_error_iri` | `vtec_set_mlp - vtec_iri_ref` | TECU |
+| `vtec_set_mlp_abs_error_iri` | Absolute set-to-query VTEC error | TECU |
+| `vtec_set_mlp_direct_error_iri` | Direct vertical-query diagnostic error, `vtec_set_mlp_direct - vtec_iri_ref` | TECU |
+| `vtec_set_mlp_direct_abs_error_iri` | Absolute direct vertical-query diagnostic error | TECU |
 
 ## Current Quality Control
 

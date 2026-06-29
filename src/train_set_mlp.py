@@ -83,7 +83,8 @@ CONSTELLATION_COLS = [
     "constellation_sbas", "constellation_qzss",
 ]
 TIME_COLS = ["hour_sin", "hour_cos", "doy_sin", "doy_cos"]
-OBS_GEO_CONST_COLS = QUERY_GEOM_COLS + CONSTELLATION_COLS
+QUERY_FEATURE_COLS = QUERY_GEOM_COLS + TIME_COLS
+OBS_GEO_CONST_COLS = QUERY_GEOM_COLS + TIME_COLS + CONSTELLATION_COLS
 # "source_stec" appended dynamically from args
 
 
@@ -116,6 +117,7 @@ def build_set_examples(
     max_obs: int = 40,
     ipp_radius_km: float = 200.0,
     rng: np.random.Generator | None = None,
+    include_self: bool = False,
     obs_cols: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Any]:
     """Build leave-one-out set examples for one epoch.
@@ -128,11 +130,11 @@ def build_set_examples(
     n = len(df)
     ipp_lon = df["ipp_lon"].to_numpy(dtype=np.float64)
     ipp_lat = df["ipp_lat"].to_numpy(dtype=np.float64)
-    q_geom = df[QUERY_GEOM_COLS].to_numpy(dtype=np.float64)
+    q_geom = df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
     o_feat = df[obs_cols].to_numpy(dtype=np.float64)
     stec = df[target_stec_col].to_numpy(dtype=np.float64)
 
-    QG = np.zeros((n, len(QUERY_GEOM_COLS)), dtype=np.float64)
+    QG = np.zeros((n, len(QUERY_FEATURE_COLS)), dtype=np.float64)
     OF = np.zeros((n, max_obs, n_obs_cols), dtype=np.float64)
     OM = np.zeros((n, max_obs), dtype=bool)
     OD = np.zeros((n, max_obs), dtype=np.float64) + np.inf
@@ -141,7 +143,8 @@ def build_set_examples(
 
     for i in range(n):
         dists = _haversine_km(ipp_lon[i], ipp_lat[i], ipp_lon, ipp_lat)
-        dists[i] = np.inf
+        if not include_self:
+            dists[i] = np.inf
         candidates = np.where(dists <= ipp_radius_km)[0]
         if len(candidates) > max_obs:
             order = np.argsort(dists[candidates])
@@ -165,6 +168,65 @@ def build_set_examples(
     }
     QG, OF, OM, OD, Y = QG[valid], OF[valid], OM[valid], OD[valid], Y[valid]
     return QG, OF, OM, OD, Y, extra
+
+
+def build_observation_sets(
+    query_df: pd.DataFrame,
+    context_df: pd.DataFrame,
+    *,
+    obs_cols: list[str],
+    max_obs: int,
+    ipp_radius_km: float,
+    include_query_observation: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Build nearby observed-ray sets for query rows.
+
+    ``context_df`` contains observable STEC inputs. It may be the training split
+    only, or all currently observed rays. When ``include_query_observation`` is
+    false, rows with the same dataframe index as the query are excluded.
+    """
+    n_query = len(query_df)
+    n_obs_cols = len(obs_cols)
+    context_ipp_lon = context_df["ipp_lon"].to_numpy(dtype=np.float64)
+    context_ipp_lat = context_df["ipp_lat"].to_numpy(dtype=np.float64)
+    context_index = context_df.index.to_numpy()
+    query_ipp_lon = query_df["ipp_lon"].to_numpy(dtype=np.float64)
+    query_ipp_lat = query_df["ipp_lat"].to_numpy(dtype=np.float64)
+    query_index = query_df.index.to_numpy()
+    context_obs_feat = context_df[obs_cols].to_numpy(dtype=np.float64)
+
+    obs_feat = np.zeros((n_query, max_obs, n_obs_cols), dtype=np.float64)
+    obs_mask = np.zeros((n_query, max_obs), dtype=bool)
+    obs_dist = np.zeros((n_query, max_obs), dtype=np.float64) + np.inf
+    n_neighbors = np.zeros(n_query, dtype=int)
+
+    for i in range(n_query):
+        dists = _haversine_km(
+            query_ipp_lon[i], query_ipp_lat[i], context_ipp_lon, context_ipp_lat
+        )
+        candidate_mask = dists <= ipp_radius_km
+        if not include_query_observation:
+            candidate_mask &= context_index != query_index[i]
+        candidates = np.where(candidate_mask)[0]
+        if len(candidates) > max_obs:
+            order = np.argsort(dists[candidates])
+            candidates = candidates[order[:max_obs]]
+        k = len(candidates)
+        n_neighbors[i] = k
+        if k > 0:
+            obs_feat[i, :k] = context_obs_feat[candidates]
+            obs_mask[i, :k] = True
+            obs_dist[i, :k] = dists[candidates]
+
+    valid = n_neighbors > 0
+    stats = {
+        "mean_neighbors": float(np.mean(n_neighbors[valid])) if valid.any() else 0.0,
+        "min_neighbors": int(np.min(n_neighbors[valid])) if valid.any() else 0,
+        "max_neighbors": int(np.max(n_neighbors[valid])) if valid.any() else 0,
+        "n_total": int(n_query),
+        "n_valid": int(valid.sum()),
+    }
+    return obs_feat, obs_mask, obs_dist, stats
 
 
 # ── training utilities ────────────────────────────────────────────────────
@@ -235,7 +297,7 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
     obs_feature_cols = OBS_GEO_CONST_COLS + [args.source_stec_column]
     n_obs_cols = len(obs_feature_cols)
 
-    required = (QUERY_GEOM_COLS + obs_feature_cols + TIME_COLS
+    required = (QUERY_FEATURE_COLS + obs_feature_cols
                 + [args.source_stec_column, args.slant_target_column,
                    args.vtec_target_column, args.baseline_vtec_column,
                    args.mapping_column])
@@ -251,6 +313,7 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
         max_obs=args.max_obs,
         ipp_radius_km=args.nearby_km if args.nearby_km > 0 else 200.0,
         rng=rng,
+        include_self=args.include_query_observation,
         obs_cols=obs_feature_cols,
     )
     if len(Y) < 2:
@@ -294,6 +357,7 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
     model = SetToQueryModel(
         dropout=args.dropout,
         spatial_length_scale_km=args.spatial_sigma_km,
+        n_query_features=len(QUERY_FEATURE_COLS),
         n_obs_features=n_obs_cols,
     )
     model.to(device)
@@ -329,28 +393,18 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
     train_stec_metrics = regression_metrics(Y, train_pred)
 
     # ── test predictions ─────────────────────────────────────────────
-    train_obs_feat = train_df[obs_feature_cols].to_numpy(dtype=np.float64)
-    train_ipp_lon = train_df["ipp_lon"].to_numpy(dtype=np.float64)
-    train_ipp_lat = train_df["ipp_lat"].to_numpy(dtype=np.float64)
-    test_slant_geom = test_df[QUERY_GEOM_COLS].to_numpy(dtype=np.float64)
-    test_ipp_lon = test_df["ipp_lon"].to_numpy(dtype=np.float64)
-    test_ipp_lat = test_df["ipp_lat"].to_numpy(dtype=np.float64)
+    test_slant_geom = test_df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
     n_test = len(test_df)
-
-    test_OF = np.zeros((n_test, args.max_obs, n_obs_cols), dtype=np.float64)
-    test_OM = np.zeros((n_test, args.max_obs), dtype=bool)
-    test_OD = np.zeros((n_test, args.max_obs), dtype=np.float64) + np.inf
-    for i in range(n_test):
-        dists = _haversine_km(test_ipp_lon[i], test_ipp_lat[i], train_ipp_lon, train_ipp_lat)
-        candidates = np.where(dists <= (args.nearby_km if args.nearby_km > 0 else 200.0))[0]
-        if len(candidates) > args.max_obs:
-            order = np.argsort(dists[candidates])
-            candidates = candidates[order[:args.max_obs]]
-        k = len(candidates)
-        if k > 0:
-            test_OF[i, :k] = train_obs_feat[candidates]
-            test_OM[i, :k] = True
-            test_OD[i, :k] = dists[candidates]
+    context_df = df if args.inference_context == "all_observed" else train_df
+    radius_km = args.nearby_km if args.nearby_km > 0 else 200.0
+    test_OF, test_OM, test_OD, test_context_stats = build_observation_sets(
+        test_df,
+        context_df,
+        obs_cols=obs_feature_cols,
+        max_obs=args.max_obs,
+        ipp_radius_km=radius_km,
+        include_query_observation=args.include_query_observation,
+    )
 
     test_OG_imp = q_imp.transform(test_slant_geom)
     test_OG_scaled = q_scaler.transform(test_OG_imp).astype(np.float64)
@@ -369,22 +423,13 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
     slant_pred = y_scaler.inverse_transform(slant_pred_scaled.reshape(-1, 1)).ravel()
 
     # Vertical query
-    test_vert_geom = build_vertical_target_geometry(test_df, vertical_top_km=args.vertical_top_km)[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
+    test_vert_base = build_vertical_target_geometry(test_df, vertical_top_km=args.vertical_top_km)[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
+    test_vert_time = test_df[TIME_COLS].to_numpy(dtype=np.float64)
+    test_vert_geom = np.column_stack([test_vert_base, test_vert_time])
     tv_n = len(test_df)
-    tv_OF = np.zeros((tv_n, args.max_obs, n_obs_cols), dtype=np.float64)
-    tv_OM = np.zeros((tv_n, args.max_obs), dtype=bool)
-    tv_OD = np.zeros((tv_n, args.max_obs), dtype=np.float64) + np.inf
-    for i in range(tv_n):
-        dists = _haversine_km(test_ipp_lon[i], test_ipp_lat[i], train_ipp_lon, train_ipp_lat)
-        candidates = np.where(dists <= (args.nearby_km if args.nearby_km > 0 else 200.0))[0]
-        if len(candidates) > args.max_obs:
-            order = np.argsort(dists[candidates])
-            candidates = candidates[order[:args.max_obs]]
-        k = len(candidates)
-        if k > 0:
-            tv_OF[i, :k] = train_obs_feat[candidates]
-            tv_OM[i, :k] = True
-            tv_OD[i, :k] = dists[candidates]
+    tv_OF = test_OF
+    tv_OM = test_OM
+    tv_OD = test_OD
 
     tv_OG_imp = q_imp.transform(test_vert_geom)
     tv_OG_scaled = q_scaler.transform(tv_OG_imp).astype(np.float64)
@@ -453,12 +498,15 @@ def train_set_mlp(args: argparse.Namespace) -> dict[str, Any]:
         "vtec_reference_used_for_training": False,
         "vertical_top_km": float(args.vertical_top_km),
         "training_pair_type": "leave_one_out_set",
-        "query_geom_columns": QUERY_GEOM_COLS,
+        "query_geom_columns": QUERY_FEATURE_COLS,
         "obs_feature_columns": obs_feature_cols,
         "max_obs": int(args.max_obs),
         "ipp_radius_km": float(args.nearby_km),
+        "inference_context": args.inference_context,
+        "include_query_observation": bool(args.include_query_observation),
+        "test_context_stats": test_context_stats,
         "spatial_sigma_km": float(args.spatial_sigma_km),
-        "n_query_features": len(QUERY_GEOM_COLS),
+        "n_query_features": len(QUERY_FEATURE_COLS),
         "n_obs_features": n_obs_cols,
         "set_stats": set_extra,
         "split": split_metadata,
@@ -543,6 +591,8 @@ def parse_args(argv=None):
     p.add_argument("--run-name")
     p.add_argument("--max-rows", type=int)
     p.add_argument("--max-obs", type=int, default=40, help="Max observed rays per set example.")
+    p.add_argument("--inference-context", choices=["train", "all_observed"], default="train", help="Observed-ray pool used at inference time.")
+    p.add_argument("--include-query-observation", action="store_true", help="Allow a query row's own observable STEC to appear in its observation set.")
     p.add_argument("--nearby-km", type=float, default=200.0, help="IPP radius (km) for observation set construction.")
     p.add_argument("--spatial-sigma-km", type=float, default=100.0, help="Spatial attention length-scale σ (km).")
     return p.parse_args(argv)
