@@ -131,6 +131,43 @@ def _haversine_km(lon1, lat1, lon2, lat2):
     return R * 2.0 * np.arctan2(np.sqrt(np.maximum(a, 0)), np.sqrt(np.maximum(1.0 - a, 1e-15)))
 
 
+def _finite_value_stats(values: np.ndarray) -> dict[str, Any]:
+    """Return compact JSON-safe stats for a finite numeric vector."""
+
+    values = np.asarray(values, dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {
+            "n": 0,
+            "mean": None,
+            "min": None,
+            "max": None,
+        }
+    return {
+        "n": int(finite.size),
+        "mean": float(np.mean(finite)),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+    }
+
+
+def _update_identity_pair_stats(
+    pair_metadata: dict[str, Any],
+    *,
+    identity_mask: np.ndarray,
+    values_for_stats: np.ndarray,
+    stat_key: str,
+) -> None:
+    """Update identity-pair counts and value statistics in-place."""
+
+    n_pairs = int(len(identity_mask))
+    n_identity = int(np.count_nonzero(identity_mask))
+    pair_metadata["n_identity_pairs"] = n_identity
+    pair_metadata["identity_pair_fraction"] = (
+        float(n_identity / n_pairs) if n_pairs else 0.0
+    )
+    pair_metadata[stat_key] = _finite_value_stats(values_for_stats[identity_mask])
+
 def build_nearby_pairs(
     df: pd.DataFrame,
     *,
@@ -139,7 +176,7 @@ def build_nearby_pairs(
     max_ipp_distance_km: float = 200.0,
     max_neighbors: int = 20,
     include_identity: bool = True,
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, list[str], dict[str, Any]]:
     """Build training pairs from rays whose IPPs lie within *max_ipp_distance_km*.
 
     Ionospheric electron density has a spatial correlation length of roughly
@@ -156,6 +193,8 @@ def build_nearby_pairs(
     n = len(df)
     if n < 2:
         raise ValueError("Nearby-pairs training requires at least 2 rays.")
+    if max_neighbors < 1:
+        raise ValueError("nearby_max_neighbors must be at least 1.")
 
     ipp_lon = df["ipp_lon"].to_numpy(dtype=np.float64)
     ipp_lat = df["ipp_lat"].to_numpy(dtype=np.float64)
@@ -171,14 +210,24 @@ def build_nearby_pairs(
     for i in range(n):
         dists = _haversine_km(ipp_lon[i], ipp_lat[i], ipp_lon, ipp_lat)
         mask = dists <= max_ipp_distance_km
-        if include_identity and not mask[i]:
+        if include_identity:
             mask[i] = True
+        else:
+            mask[i] = False
         candidates = np.where(mask)[0]
         if len(candidates) > max_neighbors:
             order = np.argsort(dists[candidates])
             candidates = candidates[order[:max_neighbors]]
+        if len(candidates) == 0:
+            continue
         src_parts.append(np.full(len(candidates), i, dtype=np.intp))
         tgt_parts.append(candidates.astype(np.intp))
+
+    if not src_parts:
+        raise ValueError(
+            "No nearby training pairs were created. Increase --nearby-km "
+            "or --nearby-max-neighbors."
+        )
 
     src_idx = np.concatenate(src_parts)
     tgt_idx = np.concatenate(tgt_parts)
@@ -201,7 +250,32 @@ def build_nearby_pairs(
     )
 
     valid = np.isfinite(X).all(axis=1) & np.isfinite(y)
-    return X[valid], y[valid], feature_cols
+    identity_mask = (src_idx == tgt_idx)[valid]
+    source_valid = source_stec_vals[src_idx][valid]
+    target_valid = target_stec_vals[tgt_idx][valid]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw_ratio = np.divide(
+            target_valid,
+            source_valid,
+            out=np.full(len(target_valid), np.nan, dtype=float),
+            where=np.abs(source_valid) > 1e-12,
+        )
+
+    pair_metadata: dict[str, Any] = {
+        "nearby_include_identity": bool(include_identity),
+        "nearby_max_distance_km": float(max_ipp_distance_km),
+        "nearby_max_neighbors": int(max_neighbors),
+        "n_pairs_before_finite_filter": int(len(src_idx)),
+        "n_pairs_after_finite_filter": int(np.count_nonzero(valid)),
+        "_identity_pair_mask": identity_mask,
+    }
+    _update_identity_pair_stats(
+        pair_metadata,
+        identity_mask=identity_mask,
+        values_for_stats=raw_ratio,
+        stat_key="identity_target_source_ratio_raw_stats",
+    )
+    return X[valid], y[valid], feature_cols, pair_metadata
 
 
 def build_all_to_all_pairs(
@@ -557,6 +631,7 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
 
     use_identity_pairs = not args.all_pairs and args.nearby_km <= 0
     use_numpy_pairs = args.all_pairs or args.nearby_km > 0
+    pair_metadata: dict[str, Any] = {}
 
     if args.all_pairs:
         X_train, y_train, feature_cols = build_all_to_all_pairs(
@@ -567,7 +642,7 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
         )
         pair_kind = "all_to_all"
     elif args.nearby_km > 0:
-        X_train, y_train, feature_cols = build_nearby_pairs(
+        X_train, y_train, feature_cols, pair_metadata = build_nearby_pairs(
             train_df,
             source_stec_column=args.source_stec_column,
             slant_target_column=args.slant_target_column,
@@ -622,8 +697,19 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
             & np.isfinite(y_train)
             & (np.abs(source_for_pairs) > 1e-12)
         )
+        ratio_train = y_train[valid_ratio] / source_for_pairs[valid_ratio]
+        identity_mask = pair_metadata.get("_identity_pair_mask")
+        if isinstance(identity_mask, np.ndarray):
+            identity_mask = identity_mask[valid_ratio]
+            pair_metadata["_identity_pair_mask"] = identity_mask
+            _update_identity_pair_stats(
+                pair_metadata,
+                identity_mask=identity_mask,
+                values_for_stats=ratio_train,
+                stat_key="identity_source_ratio_stats",
+            )
         X_train = X_train[valid_ratio]
-        y_train = y_train[valid_ratio] / source_for_pairs[valid_ratio]
+        y_train = ratio_train
 
     if use_numpy_pairs:
         if len(X_train) < 2:
@@ -776,6 +862,12 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
             max_rows=None,
         )
 
+    training_pair_metadata = {
+        key: value for key, value in pair_metadata.items()
+        if not key.startswith("_")
+    }
+    training_pair_metadata["pair_kind"] = pair_kind
+
     metadata = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "mode": (
@@ -821,6 +913,7 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
         "vtec_reference_used_for_inference_features": False,
         "vertical_top_km": float(args.vertical_top_km),
         "training_pair_role": pair_kind,
+        "training_pairs": training_pair_metadata,
         "target_mode": args.target_mode,
         "feature_columns": feature_cols,
         "n_features": int(len(feature_cols)),
@@ -841,6 +934,9 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
             "device": str(device),
             "all_pairs": bool(args.all_pairs),
             "nearby_km": float(args.nearby_km),
+            "nearby_max_neighbors": int(args.nearby_max_neighbors),
+            "nearby_include_identity": bool(not args.nearby_no_identity)
+            if args.nearby_km > 0 else None,
             "target_mode": args.target_mode,
         },
         "history": history,

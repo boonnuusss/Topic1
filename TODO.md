@@ -40,8 +40,12 @@ IRI-backed simulation experiment for ML-assisted conversion.
 - [x] Fix GNN azimuth feature convention to match the legacy notebook.
 - [x] Validate IPP-nearby RayMLP source-ratio plus low-elevation hybrid under
   random, time, station, and PRN splits.
-- [ ] Validate the gated hybrid20 rule (`elevation < 20 deg` and
-  `vtec_ray_mlp < vtec_slm`) on independent days and larger multi-epoch runs.
+- [x] Fix `--nearby-no-identity` semantics and run UT05:00 random self-pair A/B
+  for source-ratio RayMLP.
+- [x] Record the limitation that real observation data lack VTEC truth, so
+  hybrid-gate exploration is diagnostic rather than a mainline objective.
+- [ ] Validate core RayMLP / Set-to-Query STEC-to-VTEC conversion on independent
+  days without relying on hybrid selection tuned by `vtec_iri_ref`.
 - [ ] Validate leading Set-to-Query configurations under time, station, and PRN
   holdout splits.
 - [ ] Add paper-quality result figures and tables.
@@ -65,11 +69,11 @@ preserved for reference but are not the current mainline:
 
 ## Highest Priority Next
 
-Validate the gated hybrid20 rule on independent days. The current best one-day
-IRI-simulation evidence is `elevation < 20 deg` plus `vtec_ray_mlp < vtec_slm`,
-which improves SLM across random, station, time-smoke, and three PRN-holdout
-seeds without using `vtec_iri_ref` for selection. It still needs independent-day
-and larger multi-epoch validation before becoming a main result.
+Validate the core STEC-to-VTEC modeling route on independent days. Hybrid gates
+remain useful for IRI simulation diagnostics, but they should not drive the main
+research direction because real observation data do not provide VTEC truth for
+choosing the best gate. Prioritize truth-free model behavior, physically
+pre-specified conversion rules, and larger multi-epoch validation.
 
 ## Blocked / Needs User Decision
 

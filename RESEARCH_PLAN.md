@@ -104,13 +104,15 @@ Current single-epoch UT05:00 modeling status:
 | Identity-only RayMLP | Diagnostic only | Fits slant STEC but fails VTEC conversion because the vertical query is out of distribution. |
 | All-to-all RayMLP pairs | Tested | Better than identity-only but worse than local filtering. |
 | IPP-nearby RayMLP pairs | Active baseline | 200 km filtering reaches near-SLM VTEC accuracy with far fewer pairs. |
-| RayMLP source-ratio pairs | Current leading pure-ML route | Nearby200, 100ep trains target/source STEC ratio and reduces UT05:00 random-split VTEC RMSE from 2.44 to 2.13 TECU. |
-| Low-elevation gated hybrid20 | Current recommended conversion route | Uses source-ratio RayMLP below 20 deg only when `vtec_ray_mlp < vtec_slm`; improves all current one-day random/station/time/PRN checks. |
-| Low-elevation hybrid30 | Random-split diagnostic | Best UT05:00 random-split RMSE is 1.99 TECU, but the 20-30 deg bin can degrade stricter splits. |
+| RayMLP source-ratio pairs with self-pairs | Current leading pure-ML route | Nearby200, 100ep trains target/source STEC ratio and reduces UT05:00 random-split VTEC RMSE from 2.44 to 2.13 TECU. |
+| RayMLP source-ratio no-self pairs | Diagnostic | Excluding `i -> i` worsens pure VTEC conversion to 3.25 TECU on the same random split. |
+| Low-elevation gated hybrid20 | Simulation diagnostic / sanity check | Uses a truth-free rule below 20 deg, but hybrid selection is not a main operational target because real observations lack VTEC truth. |
+| Low-elevation gated hybrid20 no-self | Random-split diagnostic only | Shows gate sensitivity in IRI simulation; not worth optimizing further without a truth-free physical rationale. |
+| Low-elevation hybrid30 | Random-split diagnostic | Best earlier UT05:00 random-split RMSE was 1.99 TECU, but the 20-30 deg bin can degrade stricter splits. |
 | Set-to-query model | Secondary route | Nearby200, sigma100, 100ep slightly surpasses SLM on UT05:00 random split; strict splits still need testing. |
 | FNN/GNN notebook ports | Diagnostics | Useful implementation checks, but not current leading routes. |
 
-Current strict split summary for RayMLP source-ratio plus gated hybrid20:
+Current strict split summary for RayMLP source-ratio plus gated hybrid20 uses the with-self nearby default. These hybrid numbers are retained mainly to diagnose low-elevation behavior in IRI simulation. Because real observations do not include VTEC truth, selecting among hybrid gates by `vtec_iri_ref` performance is not a transferable operational strategy:
 
 | Split | SLM RMSE | Pure RayMLP RMSE | Hybrid20 all | Hybrid20 gated | Interpretation |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -134,6 +136,12 @@ For the IRI simulation, the default reference is `vtec_iri_ref` and the SLM
 baseline prediction is `vtec_slm_from_iri_stec`. Primary metrics are RMSE, MAE,
 bias, median error, 5th/95th percentile error, maximum absolute error, and R2.
 Metrics are reported overall and by elevation bin, station, and UTC hour.
+
+Hybrid metrics must be interpreted cautiously. They are meaningful for IRI
+simulation diagnostics, where `vtec_iri_ref` exists, but real observation data
+usually lack an independent VTEC truth. Therefore, the project should avoid
+spending effort on empirical hybrid-gate searches unless the rule is defined in
+advance from observable quantities and physical reasoning.
 
 ML-assisted conversion can be evaluated in either of three table forms:
 

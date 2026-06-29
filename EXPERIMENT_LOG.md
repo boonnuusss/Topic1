@@ -2055,3 +2055,131 @@ This is the strongest current one-day evidence that ML-assisted conversion can
 be meaningfully better than SLM without using VTEC truth for model training or
 hybrid selection. The remaining gate before a publishable claim is independent-
 day validation and a larger multi-epoch run.
+
+## 2026-06-29 Experiment 033: UT05 Random Self-Pair A/B For RayMLP Source-Ratio
+
+### Purpose
+
+Fix the semantics of `--nearby-no-identity` and test whether explicit self-pairs
+(`i -> i`, target/source ratio = 1) help the UT05:00 random-split RayMLP
+source-ratio route. Both runs used the same data, split, seed, nearby radius,
+neighbor cap, epoch count, batch size, and CPU device.
+
+### Code Change
+
+`src/train_ray_mlp_simulation.py` now makes the nearby-pair identity behavior
+explicit:
+
+- default nearby mode keeps `i -> i` for each source ray;
+- `--nearby-no-identity` excludes `tgt_idx == src_idx`;
+- training metadata records `nearby_include_identity`, `n_identity_pairs`,
+  `identity_pair_fraction`, and self-pair source-ratio stats.
+
+The self-pair ratio stats are computed after finite/source-ratio filtering, so
+they describe the actual training pairs.
+
+### Validation
+
+Compile check:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_ray_mlp_simulation.py src\hybrid_vtec.py
+```
+
+Smoke test on `--max-rows 300 --epochs 2` confirmed the switch works:
+
+| Smoke run | train pairs | identity pairs | identity fraction | self ratio mean/min/max |
+| --- | ---: | ---: | ---: | --- |
+| with self | 1,072 | 228 | 0.2127 | 1.0 / 1.0 / 1.0 |
+| no self | 844 | 0 | 0.0000 | n/a |
+
+### Full UT05:00 Random Split Setup
+
+Common settings:
+
+```text
+input = datasets/interim/iri_simulation_20240505_0500_spacing2p5_regular.parquet
+split = random
+seed = 42
+nearby_km = 200
+nearby_max_neighbors = 30
+target_mode = source_ratio
+epochs = 100
+batch_size = 1024
+device = cpu
+```
+
+Runs:
+
+- `ray_mlp_sim_0500_random_nearby200_e100_source_ratio_self`
+- `ray_mlp_sim_0500_random_nearby200_e100_source_ratio_no_self`
+
+Hybrid outputs used `elevation < 20 deg` and `vtec_ray_mlp < vtec_slm`:
+
+- `ray_mlp_sim_0500_random_nearby200_e100_source_ratio_self_hybrid20_ml_lt_slm`
+- `ray_mlp_sim_0500_random_nearby200_e100_source_ratio_no_self_hybrid20_ml_lt_slm`
+
+### Pair Composition
+
+| Run | train pairs | identity pairs | identity fraction | self ratio mean/min/max |
+| --- | ---: | ---: | ---: | --- |
+| with self | 27,676 | 1,622 | 0.0586 | 1.0 / 1.0 / 1.0 |
+| no self | 26,447 | 0 | 0.0000 | n/a |
+
+### Overall VTEC Metrics
+
+| Model | RMSE | MAE | Bias | R2 | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SLM baseline | 2.4400 | 1.4326 | +1.1364 | 0.9610 | Same test split |
+| RayMLP with self | 2.1300 | 1.3649 | -0.5012 | 0.9703 | Pure RayMLP improves SLM |
+| RayMLP no self | 3.2450 | 2.5102 | +2.3786 | 0.9310 | Pure RayMLP worsens SLM |
+| Gated hybrid20 with self | 2.1008 | 1.2880 | +0.1740 | 0.9711 | Uses ML on 48 / 419 rows |
+| Gated hybrid20 no self | 1.9714 | 1.2705 | +0.9650 | 0.9745 | Uses ML on 23 / 419 rows |
+
+### Elevation-Bin Metrics
+
+| Run | Bin | Model | n | RMSE | MAE | Bias | R2 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| with self raw | [10,20) | SLM | 49 | 5.8390 | 4.7763 | +4.6978 | 0.7227 |
+| with self raw | [10,20) | RayMLP | 49 | 4.5743 | 3.5436 | -3.5286 | 0.8298 |
+| no self raw | [10,20) | RayMLP | 49 | 5.1774 | 4.7376 | +4.6579 | 0.7820 |
+| with self hybrid | [10,20) | Hybrid | 49 | 4.5742 | 3.5402 | -3.5320 | 0.8298 |
+| no self hybrid | [10,20) | Hybrid | 49 | 4.0522 | 3.3907 | +3.2325 | 0.8665 |
+| with self raw | [20,30) | SLM | 68 | 2.8787 | 2.3466 | +2.2019 | 0.9313 |
+| with self raw | [20,30) | RayMLP | 68 | 2.3542 | 1.7400 | -1.5642 | 0.9541 |
+| no self raw | [20,30) | RayMLP | 68 | 4.9343 | 4.5938 | +4.4284 | 0.7982 |
+| with self hybrid | [20,30) | Hybrid | 68 | 2.8787 | 2.3466 | +2.2019 | 0.9313 |
+| no self hybrid | [20,30) | Hybrid | 68 | 2.8787 | 2.3466 | +2.2019 | 0.9313 |
+
+### Interpretation
+
+Self-pairs are helpful for the pure RayMLP source-ratio model: they anchor the
+same-ray identity ratio and reduce VTEC RMSE from `3.2450` to `2.1300` TECU.
+Therefore the default nearby source-ratio training route should keep self-pairs.
+
+The no-self run is still useful diagnostically. Although its pure RayMLP VTEC is
+worse, the `ML < SLM` gate selects fewer low-elevation rows and gives the best
+UT05:00 random-split hybrid RMSE so far (`1.9714` TECU). This should not yet
+replace the current with-self robustness route, because no-self has not been
+validated under station, time, or PRN splits and it badly degrades the raw
+`[20,30)` bin.
+
+### Next Step
+
+Keep self-pairs as the default for pure RayMLP source-ratio training. Treat
+`--nearby-no-identity` as a diagnostic configuration. Do not make further hybrid
+gate search a mainline objective unless the gate is pre-specified from physics
+and uses only observable quantities.
+
+### Operational Hybrid Caveat
+
+A key limitation was added after reviewing the real-data use case: real GNSS
+observation datasets generally do not contain an independent VTEC truth. This
+means simulation-time hybrid comparisons can show where ML helps or fails, but
+they cannot by themselves define an operational hybrid rule. Tuning thresholds,
+constellation filters, or `ML < SLM` variants against `vtec_iri_ref` risks
+optimizing for the IRI benchmark rather than for the real STEC-to-VTEC problem.
+
+Going forward, hybrid products should be reported mainly as diagnostics or as
+pre-specified, truth-free physical sanity checks. The main research effort should
+return to the STEC ray model and its direct, truth-free conversion behavior.

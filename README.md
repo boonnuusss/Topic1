@@ -244,9 +244,11 @@ Current UT05:00 random-split benchmark status:
 | Route | VTEC RMSE | R2 | Notes |
 | --- | ---: | ---: | --- |
 | SLM baseline | 2.44 | 0.961 | Traditional reference |
-| RayMLP source-ratio nearby200, 100ep | 2.13 | 0.970 | Trains target/source STEC ratio; no VTEC reference in training |
-| Hybrid low-elevation ML, threshold 30 deg | 1.99 | 0.974 | Best random-split run, but less conservative under stricter splits |
-| Hybrid gated low-elevation ML, threshold 20 deg | 2.10 | 0.971 | Use ML below 20 deg only when ML VTEC is lower than SLM |
+| RayMLP source-ratio nearby200, 100ep, with self-pairs | 2.13 | 0.970 | Default nearby behavior; self-pair ratio is exactly 1 in this simulation |
+| RayMLP source-ratio nearby200, 100ep, no self-pairs | 3.25 | 0.931 | Diagnostic; pure VTEC conversion worsens |
+| Hybrid low-elevation ML, threshold 30 deg | 1.99 | 0.974 | Earlier random-split diagnostic, but less conservative under stricter splits |
+| Hybrid gated20 with self-pairs | 2.10 | 0.971 | Use ML below 20 deg only when ML VTEC is lower than SLM |
+| Hybrid gated20 no-self diagnostic | 1.97 | 0.975 | Best random-split diagnostic so far; strict splits still untested |
 | Set-to-query nearby200, sigma100, 100ep | 2.40 | 0.962 | Slightly better than SLM in random split |
 | RayMLP nearby-200 absolute STEC, 100ep | 2.55 | 0.958 | Near SLM with filtered ray pairs |
 | RayMLP all-to-all, 20ep | 3.24 | 0.931 | Worse than nearby filtering |
@@ -254,7 +256,13 @@ Current UT05:00 random-split benchmark status:
 
 Strict holdout checks currently favor a conservative gated hybrid:
 use RayMLP only when `elevation < 20 deg` and `vtec_ray_mlp < vtec_slm`.
-This gate uses only model/SLM predictions, not `vtec_iri_ref`.
+This gate uses only model/SLM predictions, not `vtec_iri_ref`. However, hybrid
+search should be treated as an IRI-simulation diagnostic, not as the main
+operational target. In real GNSS observations there is usually no independent
+VTEC truth available to decide which hybrid gate is actually best, so tuning
+thresholds or gate logic against `vtec_iri_ref` can overfit the simulation
+benchmark. Further hybrid work should use only pre-specified, physically
+motivated, truth-free rules.
 
 | Split | SLM RMSE | Pure RayMLP RMSE | Hybrid20 all | Hybrid20 gated | Status |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -267,9 +275,10 @@ This gate uses only model/SLM predictions, not `vtec_iri_ref`.
 
 The present best evidence is therefore not that pure RayMLP replaces SLM.
 Rather, RayMLP can help in the lowest-elevation regime where SLM is weakest,
-while SLM remains preferable elsewhere. The gated hybrid is the current leading
-one-day IRI-simulation route; it still needs independent-day validation before
-being treated as a final scientific result.
+while SLM remains preferable elsewhere. Hybrid results are useful for diagnosing
+where ML helps, but the main scientific route should prioritize the STEC ray
+model and its truth-free STEC-to-VTEC conversion behavior, because real
+observational data do not provide VTEC truth for selecting a hybrid rule.
 
 For the RayMLP simulation route below, evaluate `vtec_ray_mlp` as the final
 ratio-converted VTEC prediction column. The raw vertical target-ray model output
@@ -311,7 +320,9 @@ IPP/time. The output table includes `stec_ray_mlp`, `vtec_ray_mlp_direct`,
 is then evaluated by `src.evaluate`.
 
 For the current pair-learning route, prefer IPP-nearby pairs over all-to-all
-pairs. The best current RayMLP route trains a target/source STEC ratio:
+pairs. The best current pure RayMLP route trains a target/source STEC ratio and
+keeps the default self-pairs, so each source ray also teaches the identity ratio
+`i -> i = 1`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.train_ray_mlp_simulation `
@@ -323,9 +334,15 @@ pairs. The best current RayMLP route trains a target/source STEC ratio:
   --epochs 100
 ```
 
+Use `--nearby-no-identity` only as a diagnostic switch. After the UT05:00 random
+self-pair A/B test, excluding self-pairs worsened pure RayMLP VTEC RMSE
+(`3.25` versus `2.13` TECU), although it produced a more conservative gated20
+random-split diagnostic (`1.97` TECU) that still needs strict-split validation.
+
 A physically constrained hybrid keeps the ML correction only at the lowest
-elevation angles. The current recommended robustness gate also requires the ML
-VTEC estimate to be lower than the SLM estimate:
+elevation angles. This is retained as a simulation diagnostic and sanity check,
+not as a rule to keep optimizing against IRI truth. The current truth-free gate
+also requires the ML VTEC estimate to be lower than the SLM estimate:
 
 ```powershell
 .\scripts\build_hybrid_vtec.ps1 `
