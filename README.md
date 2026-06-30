@@ -393,6 +393,28 @@ context was not automatically better: `context_km=100, max_obs=5` gave `2.0997`,
 and `context_km=200, max_obs=40` gave `3.4199`. Treat neighbor context as a
 research variable, not an assumed improvement.
 
+For full-dataset conversion diagnostics, use `--split all`. This trains on all
+slant rays and evaluates vertical-query VTEC on all rays, while still keeping
+`vtec_iri_ref` out of training. On UT05:00, increasing the all-ray anchor-only
+run from 100 to 200 epochs improved RMSE from `1.8884` to `1.7806` TECU on all
+`2,041` rays, versus `2.4953` for SLM. Report this separately from holdout
+metrics because training and evaluation rays overlap, and the improvement with
+epochs is not monotonic.
+For high-elevation operational relevance, the training entry point also supports
+`--min-train-elevation-deg`, `--min-eval-elevation-deg`, and
+`--target-mode slm_correction`. Add `--elevation-shrinkage` to force the learned
+SLM correction toward 1 as source elevation increases:
+
+```text
+correction = 1 + strength(elevation) * (raw_correction - 1)
+```
+
+On the UT05:00 random split with `elevation >= 30`, the current leading
+high-elevation route is SLM-correction with shrinkage power 2: RMSE `0.8293`
+TECU and MAE `0.5626`, versus SLM RMSE `0.9285` and MAE `0.6842`. This is the
+first high-elevation-only setting that beats SLM overall without degrading the
+near-zenith bins.
+
 ## Set-to-Query Simulation Training
 
 The current best UT05:00 simulation route is:

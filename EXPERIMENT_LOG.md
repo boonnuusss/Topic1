@@ -2402,3 +2402,448 @@ Do not replace the current soft `set_ratio_mlp_0500_anchor1_e100` route with the
 hard-identity variant. Keep `--hard-identity-ratio` as a diagnostic option. If
 identity constraints are revisited, test softer physics penalties or a mapping-
 aware parameterization rather than an exact zero-delta residual constraint.
+
+## 2026-06-30 Experiment 036: All-Ray Set-Ratio Anchor1 Fit And Evaluation
+
+### Purpose
+
+Test the user's hypothesis that, for the STEC-to-VTEC conversion objective, it is
+reasonable to train on all simulated slant rays and evaluate conversion on all
+rays, as long as `vtec_iri_ref` is not used as a training label.
+
+This experiment is not a holdout generalization test. It is a full-data
+conversion diagnostic: all UT05:00 rays are used for slant source-ratio training,
+and the trained model is then queried with the vertical special ray for every
+input source ray.
+
+### Code Change
+
+`src.train_set_ratio_mlp` now supports:
+
+```powershell
+--split all
+```
+
+This sets:
+
+```text
+train_df = full dataset
+test_df  = full dataset
+train_test_overlap = true
+```
+
+The metadata explicitly marks the result as a diagnostic full-data
+fit/evaluation. `vtec_iri_ref` is still evaluation-only and is not included in
+training.
+
+### Command
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_all_anchor1_e100 `
+  --split all `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+### Setup
+
+| Item | Value |
+| --- | ---: |
+| Input rays | 2,041 |
+| Training rays | 2,041 |
+| Evaluation rays | 2,041 |
+| Train pair examples | 38,830 |
+| Identity pairs | 2,041 |
+| Identity pair fraction | 0.0526 |
+| Context observations per example | 1 |
+| VTEC truth used for training | false |
+
+### Overall Results
+
+| Route | n | VTEC RMSE | VTEC MAE | Bias | R2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline, all rays | 2,041 | 2.4953 | 1.4254 | +1.0612 | 0.9637 |
+| Set-ratio anchor1, all train/all eval | 2,041 | 1.8884 | 1.3279 | +0.4195 | 0.9792 |
+
+Relative to SLM on the same 2,041 rays, the full-data set-ratio model reduces
+RMSE by `0.6070` TECU (`24.32%`) and MAE by `0.0975` TECU (`6.84%`).
+
+The slant self-query check remains close to identity but is not hard-constrained:
+
+```text
+set_ratio_slant_ratio mean = 1.0037
+min/max = 0.9663 / 1.0485
+mean |ratio - 1| = 0.0054
+```
+
+### Elevation-Bin Results
+
+| Elevation bin | n | SLM RMSE | Set-ratio all RMSE | MAE | Bias | R2 | RMSE change vs SLM |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| [10,20) | 238 | 6.1917 | 3.7486 | 2.7934 | -1.8859 | 0.9025 | -2.4432 |
+| [20,30) | 338 | 2.7186 | 2.1258 | 1.6596 | +1.2236 | 0.9729 | -0.5929 |
+| [30,40) | 307 | 1.2261 | 1.7411 | 1.4252 | +0.8828 | 0.9839 | +0.5150 |
+| [40,50) | 328 | 0.9499 | 1.4346 | 1.2222 | +0.7306 | 0.9840 | +0.4846 |
+| [50,60) | 358 | 0.8000 | 1.1660 | 0.9818 | +0.8703 | 0.9892 | +0.3661 |
+| [60,70) | 256 | 0.5823 | 0.9621 | 0.7571 | +0.2800 | 0.9936 | +0.3797 |
+| [70,80) | 135 | 0.2917 | 0.7070 | 0.5765 | +0.0568 | 0.9972 | +0.4153 |
+| [80,90) | 81 | 0.1278 | 0.3406 | 0.2823 | -0.1253 | 0.9995 | +0.2128 |
+
+### Interpretation
+
+The full-data result supports the conversion-oriented argument: even when all
+slant rays are used for training, the experiment is still meaningful because the
+model never trains on `vtec_iri_ref`. The evaluated vertical ray is a different
+query geometry from the original observed slant ray, so the VTEC result remains a
+conversion test rather than a direct VTEC fit.
+
+The result is still not an operational generalization metric. Since the same
+source rays appear in training and evaluation, it should be reported as an
+all-ray diagnostic. The strict holdout tests remain necessary for claims about
+how well the learned conversion transfers to unseen stations, PRNs, times, or
+days.
+
+The pattern is consistent with earlier random-split results: the ML conversion
+mainly helps low elevations (`[10,30)`), while SLM remains stronger at higher
+elevations where the mapping problem is already easy.
+
+### Decision
+
+Keep `--split all` as a useful diagnostic mode for full-dataset conversion
+behavior. Do not mix its metrics with holdout metrics when making generalization
+claims.
+
+## 2026-06-30 Experiment 037: All-Ray Set-Ratio Anchor1 Epoch Sweep
+
+### Purpose
+
+Test whether the all-ray anchor-only set-ratio run in Experiment 036 was simply
+under-trained. The training set is larger than the random-split run because all
+2,041 UT05:00 rays are used for source-ratio training, so 150 and 200 epochs were
+tried with the same geometry, seed, pair construction, and all/eval split.
+
+### Commands
+
+Both runs used the same command as Experiment 036, changing only `--run-name` and
+`--epochs`:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --split all `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --epochs 150-or-200 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+`vtec_iri_ref` remained evaluation-only and was not used for training.
+
+### Overall Results
+
+| Route | n | Epochs | VTEC RMSE | VTEC MAE | Bias | R2 | Train pair-ratio RMSE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline, all rays | 2,041 | - | 2.4953 | 1.4254 | +1.0612 | 0.9637 | - |
+| Set-ratio all train/all eval | 2,041 | 100 | 1.8884 | 1.3279 | +0.4195 | 0.9792 | 0.0331 |
+| Set-ratio all train/all eval | 2,041 | 150 | 2.0430 | 1.4251 | +0.6114 | 0.9757 | 0.0320 |
+| Set-ratio all train/all eval | 2,041 | 200 | 1.7806 | 1.2352 | -0.4143 | 0.9815 | 0.0268 |
+
+For reference, the earlier random-split model evaluated on all 2,041 rays had a
+diagnostic RMSE of about `1.6133` TECU, so the all-trained 200-epoch model is
+better than all-trained 100 epochs but still does not surpass the earlier
+split-trained model under all-ray evaluation.
+
+### Elevation-Bin Results
+
+| Elevation bin | n | SLM RMSE | e100 RMSE | e150 RMSE | e200 RMSE | e200 bias |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| [10,20) | 238 | 6.1917 | 3.7486 | 3.2279 | 2.4095 | +0.0245 |
+| [20,30) | 338 | 2.7186 | 2.1258 | 3.4687 | 2.4789 | +0.8933 |
+| [30,40) | 307 | 1.2261 | 1.7411 | 1.6169 | 1.6337 | -0.4729 |
+| [40,50) | 328 | 0.9499 | 1.4346 | 1.2151 | 1.6428 | -0.9102 |
+| [50,60) | 358 | 0.8000 | 1.1660 | 0.8780 | 1.2750 | -0.8259 |
+| [60,70) | 256 | 0.5823 | 0.9621 | 1.0320 | 1.4422 | -0.9774 |
+| [70,80) | 135 | 0.2917 | 0.7070 | 0.9123 | 1.0737 | -0.8314 |
+| [80,90) | 81 | 0.1278 | 0.3406 | 0.5493 | 0.6804 | -0.6364 |
+
+### Interpretation
+
+Increasing epochs helps partially but not monotonically. The pair-ratio training
+error decreases from 100 to 200 epochs, yet VTEC error worsens at 150 epochs and
+only improves at 200 epochs. This means the all-ray result is not explained by
+simple under-training alone. The slant pair-ratio objective and the vertical-query
+conversion objective are related but not identical, so better pair-ratio fitting
+can still shift the vertical extrapolation bias.
+
+The 200-epoch run is the current best all-ray diagnostic among these three runs.
+It mainly improves the difficult `[10,20)` elevation bin, where SLM has the
+largest mapping error. At higher elevations, SLM remains stronger because the
+traditional mapping problem is already easy there.
+
+### Decision
+
+Keep `set_ratio_mlp_0500_all_anchor1_e200` as the current all-ray diagnostic
+reference, but do not replace the random-split holdout result with it. The next
+useful tests are learning-rate scheduling, early stopping on a truth-free slant
+validation objective, seed sweeps, or a loss that better aligns slant-ratio
+training with vertical-query conversion.
+## 2026-06-30 Experiment 038: High-Elevation SLM-Correction Set-Ratio A/B
+
+### Purpose
+
+In practical GNSS processing, STEC rays below about 30 deg elevation are often
+excluded because low-elevation observations are more vulnerable to multipath,
+longer slant-path uncertainty, and mapping-function error. Therefore, the main
+conversion target should not be dominated by improvements in the `[10,30)` bins.
+This experiment tests whether the set-ratio route can improve STEC-to-VTEC
+conversion for `elevation >= 30 deg`, where SLM is already a strong physical
+baseline.
+
+### Code Change
+
+`src.train_set_ratio_mlp` now supports:
+
+```powershell
+--min-train-elevation-deg 30
+--min-eval-elevation-deg 30
+--target-mode source_ratio|slm_correction
+--correction-regularization <lambda>
+```
+
+`target-mode=slm_correction` trains the model on:
+
+```text
+correction = (target_STEC / source_STEC) / (M_target / M_source)
+```
+
+At VTEC inference, the model output is multiplied back into the SLM geometric
+ratio:
+
+```text
+vertical_ratio = predicted_correction * (M_vertical / M_source)
+vtec_set_ratio_mlp = source_STEC * vertical_ratio
+```
+
+`vtec_iri_ref` remains evaluation-only and is not used during training.
+
+### Commands
+
+High-elevation source-ratio run:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_high30_anchor1_e100_source_ratio `
+  --split random `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --target-mode source_ratio `
+  --min-train-elevation-deg 30 `
+  --min-eval-elevation-deg 30 `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+High-elevation SLM-correction run:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_high30_anchor1_e100_slm_correction_reg001 `
+  --split random `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --target-mode slm_correction `
+  --correction-regularization 0.001 `
+  --min-train-elevation-deg 30 `
+  --min-eval-elevation-deg 30 `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+### Overall Results, Elevation >= 30 Deg
+
+All routes below are evaluated on the same 302 random-split test rays with
+`elevation >= 30 deg`.
+
+| Route | Train elev >=30 | Target mode | Eval n | RMSE | MAE | Bias | R2 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline | - | physical SLM | 302 | 0.9285 | 0.6842 | +0.3186 | 0.9944 |
+| Current all-elev source-ratio | no | source ratio | 302 | 1.1877 | 0.8972 | -0.0867 | 0.9908 |
+| High30 source-ratio | yes | source ratio | 302 | 1.7340 | 1.3776 | +0.9281 | 0.9805 |
+| High30 SLM-correction | yes | SLM correction | 302 | 1.0250 | 0.7488 | -0.2646 | 0.9932 |
+
+### Elevation-Bin Results
+
+| Elevation bin | n | SLM RMSE | Current RMSE | High30 source RMSE | High30 SLM-corr RMSE | SLM-corr bias |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| [30,40) | 64 | 1.4483 | 1.4354 | 2.3270 | 1.4501 | -0.2615 |
+| [40,50) | 69 | 0.9515 | 1.2724 | 1.6777 | 0.8847 | -0.3150 |
+| [50,60) | 78 | 0.7676 | 1.2834 | 1.3941 | 1.0287 | -0.2449 |
+| [60,70) | 49 | 0.5748 | 0.9253 | 1.8927 | 0.7107 | -0.1219 |
+| [70,80) | 28 | 0.2135 | 0.6142 | 1.1573 | 0.6167 | -0.2394 |
+| [80,90) | 14 | 0.1333 | 0.3195 | 0.4302 | 0.8780 | -0.6898 |
+
+### Interpretation
+
+For `elevation >= 30 deg`, SLM is much harder to beat than in the low-elevation
+bins. The existing all-elevation source-ratio model and the high-elevation-only
+source-ratio model both degrade the high-elevation conversion. The high-elevation
+source-ratio run is especially poor, suggesting that directly learning the full
+source-to-vertical ratio is too unconstrained when the physical SLM prior is
+already accurate.
+
+The SLM-correction formulation is a better direction: it reduces the high-angle
+RMSE from `1.7340` to `1.0250` relative to the high30 source-ratio run and even
+slightly improves the `[40,50)` bin versus SLM. However, it still does not beat
+SLM overall (`1.0250` vs `0.9285`) and it damages the highest-elevation bins,
+where the best behavior should be almost no correction.
+
+### Decision
+
+Do not replace SLM for high-elevation conversion with the current ML model. Keep
+SLM-correction as the preferred research direction over direct source-ratio, but
+it needs stronger physics control before it can be useful for `elevation >= 30
+deg`. The next experiments should test elevation-dependent correction shrinkage,
+for example forcing correction strength toward zero as elevation approaches 90
+deg, stronger correction-to-one penalties, or an explicit residual model:
+
+```text
+vtec_ml = vtec_slm + residual
+residual -> 0 as elevation increases
+```
+## 2026-06-30 Experiment 039: Elevation-Dependent Shrinkage For High-Elevation SLM Correction
+
+### Purpose
+
+Experiment 038 showed that SLM-correction is a better high-elevation direction
+than direct source-ratio learning, but it still damaged the highest-elevation
+bins where SLM should be trusted most. This experiment adds a truth-free,
+physics-motivated shrinkage rule: as source-ray elevation increases, force the
+ML correction factor closer to 1, so the conversion smoothly falls back to SLM.
+
+### Code Change
+
+`src.train_set_ratio_mlp` now supports:
+
+```powershell
+--elevation-shrinkage
+--shrinkage-start-deg 30
+--shrinkage-end-deg 90
+--shrinkage-power 2
+--shrinkage-min-strength 0
+```
+
+For `target-mode=slm_correction`, the model first predicts `raw_correction`.
+The final correction is:
+
+```text
+strength(elev) = clip((end_deg - elev) / (end_deg - start_deg), 0, 1) ** power
+shrunk_correction = 1 + strength(elev) * (raw_correction - 1)
+```
+
+Thus a 30 deg source ray keeps nearly all ML correction, while a near-zenith ray
+is forced almost completely back to SLM. This rule does not use `vtec_iri_ref`.
+The output table stores both raw and shrunk corrections:
+
+```text
+set_ratio_vertical_correction_raw
+set_ratio_vertical_correction
+set_ratio_elevation_shrinkage_strength
+```
+
+### Main Command
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_high30_anchor1_e100_slm_correction_shrink_p2 `
+  --split random `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --target-mode slm_correction `
+  --correction-regularization 0.001 `
+  --elevation-shrinkage `
+  --shrinkage-start-deg 30 `
+  --shrinkage-end-deg 90 `
+  --shrinkage-power 2 `
+  --min-train-elevation-deg 30 `
+  --min-eval-elevation-deg 30 `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+### Overall Results, Elevation >= 30 Deg
+
+| Route | RMSE | MAE | Bias | R2 |
+| --- | ---: | ---: | ---: | ---: |
+| SLM baseline | 0.9285 | 0.6842 | +0.3186 | 0.9944 |
+| High30 source-ratio | 1.7340 | 1.3776 | +0.9281 | 0.9805 |
+| High30 SLM-correction | 1.0250 | 0.7488 | -0.2646 | 0.9932 |
+| High30 SLM-corr shrink p1 | 0.8711 | 0.5782 | -0.0713 | 0.9951 |
+| High30 SLM-corr shrink p2 | 0.8293 | 0.5626 | +0.0240 | 0.9955 |
+
+The `power=2` shrinkage run reduces RMSE by `0.0992` TECU relative to SLM
+(`10.68%`) and MAE by `0.1217` TECU (`17.79%`) on the same 302 high-elevation
+test rays.
+
+### Elevation-Bin Results, Power 2
+
+| Elevation bin | n | SLM RMSE | Shrink p2 RMSE | MAE | Bias | strength mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| [30,40) | 64 | 1.4483 | 1.3193 | 0.9472 | -0.1488 | 0.8432 |
+| [40,50) | 69 | 0.9515 | 0.7173 | 0.5348 | -0.0661 | 0.5690 |
+| [50,60) | 78 | 0.7676 | 0.7663 | 0.5678 | +0.1113 | 0.3491 |
+| [60,70) | 49 | 0.5748 | 0.5281 | 0.4537 | +0.2492 | 0.1730 |
+| [70,80) | 28 | 0.2135 | 0.2013 | 0.1601 | +0.0205 | 0.0695 |
+| [80,90) | 14 | 0.1333 | 0.1263 | 0.0983 | -0.0099 | 0.0132 |
+
+### Interpretation
+
+Elevation-dependent shrinkage fixes the main failure mode from Experiment 038.
+The model still learns a local correction to SLM where the geometry is less
+vertical (`30-50 deg`), but the correction is progressively suppressed at higher
+elevations. This prevents the ML model from damaging the near-zenith bins where
+SLM is already very accurate.
+
+The result is the first high-elevation-only route in this project that beats SLM
+overall while also avoiding obvious high-elevation degradation. The rule is also
+operationally plausible because it is determined only by source elevation and the
+SLM prior, not by IRI VTEC truth.
+
+### Decision
+
+Promote `SLM-correction + elevation-dependent shrinkage` to the leading
+high-elevation STEC-to-VTEC route for UT05:00 simulation diagnostics. Keep
+`power=2`, `start=30 deg`, `end=90 deg`, and `min_strength=0` as the current
+reference setting, while treating the power sweep as simulation diagnostic rather
+than an operational truth-tuned hyperparameter search.

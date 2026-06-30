@@ -113,6 +113,8 @@ Current single-epoch UT05:00 modeling status:
 | Set-to-query absolute model | Secondary/diagnostic route | Absolute-STEC set-to-query slightly surpasses SLM, but source-ratio formulation is now stronger. |
 | Neighbor context in set-ratio model | Diagnostic | Small context (`100 km`, `5` obs) is competitive, but larger context degraded VTEC; context aggregation needs more design. |
 | Hard identity set-ratio model | Diagnostic / not mainline | Enforces same-ray ratio exactly 1, but worsens UT05:00 random VTEC RMSE to 3.22 TECU; keep as a failed hard-constraint test. |
+| All-ray set-ratio fit/evaluation | Diagnostic / full-data conversion check | Trains on all UT05:00 slant rays and evaluates all vertical queries without using VTEC truth for training; 200 epochs improve all-ray SLM RMSE from 2.50 to 1.78 TECU, but this is not a holdout generalization metric. |
+| High-elevation SLM-correction with shrinkage | Leading high-elevation route | For elevation >=30 deg, SLM-correction plus elevation-dependent shrinkage improves SLM RMSE from 0.93 to 0.83 TECU and suppresses damage in near-zenith bins. |
 | FNN/GNN notebook ports | Diagnostics | Useful implementation checks, but not current leading routes. |
 
 Current strict split summary for RayMLP source-ratio plus gated hybrid20 uses the with-self nearby default. These hybrid numbers are retained mainly to diagnose low-elevation behavior in IRI simulation. Because real observations do not include VTEC truth, selecting among hybrid gates by `vtec_iri_ref` performance is not a transferable operational strategy:

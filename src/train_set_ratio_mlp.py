@@ -161,8 +161,10 @@ def build_pair_set_ratio_examples(
     include_identity: bool,
     max_pair_examples: int | None,
     seed: int,
+    mapping_col: str | None = None,
+    target_mode: str = "source_ratio",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    """Build source-context/target-query examples with source-ratio labels."""
+    """Build source-context/target-query examples with ratio-like labels."""
 
     n = len(df)
     if n < 2:
@@ -175,6 +177,15 @@ def build_pair_set_ratio_examples(
     context_base = df[obs_cols].to_numpy(dtype=np.float64)
     source_stec = df[source_stec_col].to_numpy(dtype=np.float64)
     target_stec = df[target_stec_col].to_numpy(dtype=np.float64)
+    mapping = None
+    if target_mode == "slm_correction":
+        if mapping_col is None:
+            raise ValueError("mapping_col is required for target_mode=slm_correction.")
+        if mapping_col not in df.columns:
+            raise KeyError(f"Training input is missing mapping column: {mapping_col}")
+        mapping = df[mapping_col].to_numpy(dtype=np.float64)
+    elif target_mode != "source_ratio":
+        raise ValueError(f"Unsupported set-ratio target mode: {target_mode}")
 
     src_parts: list[np.ndarray] = []
     tgt_parts: list[np.ndarray] = []
@@ -200,16 +211,43 @@ def build_pair_set_ratio_examples(
     src_idx = np.concatenate(src_parts)
     tgt_idx = np.concatenate(tgt_parts)
     with np.errstate(divide="ignore", invalid="ignore"):
-        labels = np.divide(
+        raw_ratio = np.divide(
             target_stec[tgt_idx],
             source_stec[src_idx],
             out=np.full(len(src_idx), np.nan, dtype=np.float64),
             where=np.abs(source_stec[src_idx]) > 1e-12,
         )
-    finite = np.isfinite(labels) & np.isfinite(query_geom[tgt_idx]).all(axis=1)
+    slm_pair_ratio = None
+    if target_mode == "source_ratio":
+        labels = raw_ratio
+    else:
+        assert mapping is not None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slm_pair_ratio = np.divide(
+                mapping[tgt_idx],
+                mapping[src_idx],
+                out=np.full(len(src_idx), np.nan, dtype=np.float64),
+                where=mapping[src_idx] > 0,
+            )
+            labels = np.divide(
+                raw_ratio,
+                slm_pair_ratio,
+                out=np.full(len(src_idx), np.nan, dtype=np.float64),
+                where=np.abs(slm_pair_ratio) > 1e-12,
+            )
+    finite = (
+        np.isfinite(labels)
+        & np.isfinite(raw_ratio)
+        & np.isfinite(query_geom[tgt_idx]).all(axis=1)
+    )
+    if slm_pair_ratio is not None:
+        finite &= np.isfinite(slm_pair_ratio) & (slm_pair_ratio > 0)
     src_idx = src_idx[finite]
     tgt_idx = tgt_idx[finite]
     labels = labels[finite]
+    raw_ratio = raw_ratio[finite]
+    if slm_pair_ratio is not None:
+        slm_pair_ratio = slm_pair_ratio[finite]
 
     if max_pair_examples is not None and len(labels) > max_pair_examples:
         rng = np.random.default_rng(seed)
@@ -217,6 +255,9 @@ def build_pair_set_ratio_examples(
         src_idx = src_idx[keep]
         tgt_idx = tgt_idx[keep]
         labels = labels[keep]
+        raw_ratio = raw_ratio[keep]
+        if slm_pair_ratio is not None:
+            slm_pair_ratio = slm_pair_ratio[keep]
 
     n_examples = len(labels)
     n_obs_features = len(obs_cols) + 1
@@ -261,6 +302,11 @@ def build_pair_set_ratio_examples(
     valid = OM.any(axis=1) & np.isfinite(labels)
     identity = src_idx == tgt_idx
     stats = {
+        "target_mode": target_mode,
+        "training_label_stats": _finite_stats(labels[valid]),
+        "raw_source_ratio_stats": _finite_stats(raw_ratio[valid]),
+        "slm_pair_ratio_stats": _finite_stats(slm_pair_ratio[valid])
+        if slm_pair_ratio is not None else None,
         "n_pairs_before_context_filter": int(n_examples),
         "n_pairs_after_context_filter": int(valid.sum()),
         "n_identity_pairs": int(np.count_nonzero(identity[valid])),
@@ -455,6 +501,41 @@ def _ratio_identity_stats(ratio: np.ndarray, delta: np.ndarray) -> dict[str, Any
     }
 
 
+def elevation_shrinkage_strength(
+    elevation_deg: np.ndarray,
+    *,
+    enabled: bool,
+    start_deg: float,
+    end_deg: float,
+    power: float,
+    min_strength: float,
+) -> np.ndarray:
+    """Return how much of the ML correction to keep at each source elevation."""
+
+    elevation = np.asarray(elevation_deg, dtype=np.float64)
+    if not enabled:
+        return np.ones_like(elevation, dtype=np.float64)
+    if end_deg <= start_deg:
+        raise ValueError("--shrinkage-end-deg must be larger than --shrinkage-start-deg.")
+    if power <= 0:
+        raise ValueError("--shrinkage-power must be positive.")
+    clipped_min = float(np.clip(min_strength, 0.0, 1.0))
+    base = (float(end_deg) - elevation) / (float(end_deg) - float(start_deg))
+    strength = np.clip(base, 0.0, 1.0) ** float(power)
+    return np.maximum(strength, clipped_min).astype(np.float64)
+
+
+def apply_correction_shrinkage(
+    correction: np.ndarray,
+    strength: np.ndarray,
+) -> np.ndarray:
+    """Shrink a correction factor toward 1 using a 0..1 strength."""
+
+    correction = np.asarray(correction, dtype=np.float64)
+    strength = np.asarray(strength, dtype=np.float64)
+    return 1.0 + strength * (correction - 1.0)
+
+
 class _SetDeltaDataset(Dataset):
     def __init__(self, q_geom, obs_feat, obs_mask, obs_dists, labels, deltas):
         self._q = q_geom.copy()
@@ -529,6 +610,71 @@ def _predict_hard_identity_ratio(
     return np.concatenate(preds, axis=0).ravel()
 
 
+def choose_set_ratio_split(
+    df: pd.DataFrame,
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Choose train/evaluation rows for set-ratio simulation experiments."""
+
+    if args.split == "all":
+        if args.test_keys_from:
+            raise ValueError("--test-keys-from cannot be used with --split all.")
+        full_df = df.copy()
+        return full_df, full_df.copy(), {
+            "type": "all",
+            "n_train": int(len(full_df)),
+            "n_test": int(len(full_df)),
+            "train_test_overlap": True,
+            "interpretation": (
+                "Diagnostic full-data fit/evaluation: all rays are used for "
+                "training and all rays are evaluated. VTEC truth remains "
+                "evaluation-only and is not used as a training label."
+            ),
+        }
+    return choose_simulation_split(df, args)
+
+
+def apply_elevation_filters(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Optionally restrict train/evaluation rows by source-ray elevation."""
+
+    train_before = int(len(train_df))
+    test_before = int(len(test_df))
+    train_min = args.min_train_elevation_deg
+    eval_min = args.min_eval_elevation_deg
+
+    if train_min is not None:
+        train_df = train_df.loc[
+            pd.to_numeric(train_df["elevation"], errors="coerce") >= float(train_min)
+        ].copy()
+    if eval_min is not None:
+        test_df = test_df.loc[
+            pd.to_numeric(test_df["elevation"], errors="coerce") >= float(eval_min)
+        ].copy()
+
+    if len(train_df) < 2:
+        raise ValueError(
+            "Elevation filtering left fewer than 2 training rays; "
+            "relax --min-train-elevation-deg."
+        )
+    if len(test_df) == 0:
+        raise ValueError(
+            "Elevation filtering left no evaluation rays; "
+            "relax --min-eval-elevation-deg."
+        )
+
+    return train_df, test_df, {
+        "min_train_elevation_deg": None if train_min is None else float(train_min),
+        "min_eval_elevation_deg": None if eval_min is None else float(eval_min),
+        "train_rows_before": train_before,
+        "train_rows_after": int(len(train_df)),
+        "test_rows_before": test_before,
+        "test_rows_after": int(len(test_df)),
+    }
+
 def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     set_random_seed(args.seed)
     input_path = Path(args.input)
@@ -556,7 +702,11 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     )
     require_columns(df, required)
 
-    train_df, test_df, split_metadata = choose_simulation_split(df, args)
+    train_df, test_df, split_metadata = choose_set_ratio_split(df, args)
+    train_df, test_df, elevation_filter_metadata = apply_elevation_filters(
+        train_df, test_df, args
+    )
+    split_metadata["elevation_filter"] = elevation_filter_metadata
     QG, OF, OM, OD, Y, pair_stats = build_pair_set_ratio_examples(
         train_df,
         source_stec_col=args.source_stec_column,
@@ -569,6 +719,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         include_identity=not args.no_identity,
         max_pair_examples=args.max_pair_examples,
         seed=args.seed,
+        mapping_col=args.mapping_column,
+        target_mode=args.target_mode,
     )
     if len(Y) < 2:
         raise ValueError("Set-ratio training requires at least 2 valid examples.")
@@ -620,6 +772,19 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
     criterion = torch.nn.MSELoss()
+    correction_mean_tensor = None
+    correction_scale_tensor = None
+    if (
+        args.target_mode == "slm_correction"
+        and args.correction_regularization > 0
+        and not args.hard_identity_ratio
+    ):
+        correction_mean_tensor = torch.tensor(
+            float(y_scaler.mean_[0]), dtype=torch.float32, device=device
+        )
+        correction_scale_tensor = torch.tensor(
+            float(y_scaler.scale_[0]), dtype=torch.float32, device=device
+        )
 
     history = []
     for epoch in range(1, args.epochs + 1):
@@ -642,6 +807,14 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             raw = model(qg, of_, om, od)
             pred = 1.0 + gd * raw if args.hard_identity_ratio else raw
             loss = criterion(pred, yb)
+            if args.target_mode == "slm_correction" and args.correction_regularization > 0:
+                if args.hard_identity_ratio:
+                    pred_label = pred
+                else:
+                    pred_label = pred * correction_scale_tensor + correction_mean_tensor
+                loss = loss + float(args.correction_regularization) * torch.mean(
+                    (pred_label - 1.0) ** 2
+                )
             loss.backward()
             optimizer.step()
             bs = len(qg)
@@ -650,7 +823,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         history.append({"epoch": epoch, "train_loss": total_loss / max(total_count, 1)})
 
     if args.hard_identity_ratio:
-        train_pred_ratio = _predict_hard_identity_ratio(
+        train_pred_label = _predict_hard_identity_ratio(
             model,
             device,
             QG_scaled,
@@ -664,7 +837,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         train_pred_scaled = _predict_set(
             model, device, QG_scaled, OF_scaled, OM, OD, batch_size=args.batch_size
         )
-        train_pred_ratio = y_scaler.inverse_transform(
+        train_pred_label = y_scaler.inverse_transform(
             train_pred_scaled.reshape(-1, 1)
         ).ravel()
 
@@ -712,7 +885,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     if args.hard_identity_ratio:
-        slant_ratio = _predict_hard_identity_ratio(
+        slant_model_output = _predict_hard_identity_ratio(
             model,
             device,
             slant_QG_scaled,
@@ -722,7 +895,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             slant_identity_delta,
             batch_size=args.batch_size,
         )
-        vertical_ratio = _predict_hard_identity_ratio(
+        vertical_model_output = _predict_hard_identity_ratio(
             model,
             device,
             vert_QG_scaled,
@@ -733,7 +906,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             batch_size=args.batch_size,
         )
     else:
-        slant_ratio = y_scaler.inverse_transform(
+        slant_model_output = y_scaler.inverse_transform(
             _predict_set(
                 model,
                 device,
@@ -744,7 +917,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
                 batch_size=args.batch_size,
             ).reshape(-1, 1)
         ).ravel()
-        vertical_ratio = y_scaler.inverse_transform(
+        vertical_model_output = y_scaler.inverse_transform(
             _predict_set(
                 model,
                 device,
@@ -756,6 +929,54 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             ).reshape(-1, 1)
         ).ravel()
 
+    slant_model_output = np.maximum(slant_model_output, 0.0)
+    vertical_model_output = np.maximum(vertical_model_output, 0.0)
+    mapping_i = QUERY_FEATURE_COLS.index("slant_factor")
+    source_mapping_eval = test_df[args.mapping_column].to_numpy(dtype=np.float64)
+    slant_target_mapping = test_slant_geom[:, mapping_i]
+    vertical_target_mapping = test_vert_geom[:, mapping_i]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slm_slant_ratio = np.divide(
+            slant_target_mapping,
+            source_mapping_eval,
+            out=np.full(len(test_df), np.nan, dtype=np.float64),
+            where=source_mapping_eval > 0,
+        )
+        slm_vertical_ratio = np.divide(
+            vertical_target_mapping,
+            source_mapping_eval,
+            out=np.full(len(test_df), np.nan, dtype=np.float64),
+            where=source_mapping_eval > 0,
+        )
+    source_elevation_eval = test_df["elevation"].to_numpy(dtype=np.float64)
+    shrinkage_enabled = bool(args.elevation_shrinkage and args.target_mode == "slm_correction")
+    shrinkage_strength = elevation_shrinkage_strength(
+        source_elevation_eval,
+        enabled=shrinkage_enabled,
+        start_deg=args.shrinkage_start_deg,
+        end_deg=args.shrinkage_end_deg,
+        power=args.shrinkage_power,
+        min_strength=args.shrinkage_min_strength,
+    )
+    if args.target_mode == "source_ratio":
+        slant_ratio = slant_model_output
+        vertical_ratio = vertical_model_output
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slant_correction_raw = np.divide(slant_ratio, slm_slant_ratio)
+            vertical_correction_raw = np.divide(vertical_ratio, slm_vertical_ratio)
+        slant_correction = slant_correction_raw
+        vertical_correction = vertical_correction_raw
+    else:
+        slant_correction_raw = slant_model_output
+        vertical_correction_raw = vertical_model_output
+        slant_correction = apply_correction_shrinkage(
+            slant_correction_raw, shrinkage_strength
+        )
+        vertical_correction = apply_correction_shrinkage(
+            vertical_correction_raw, shrinkage_strength
+        )
+        slant_ratio = slant_correction * slm_slant_ratio
+        vertical_ratio = vertical_correction * slm_vertical_ratio
     slant_ratio = np.maximum(slant_ratio, 0.0)
     vertical_ratio = np.maximum(vertical_ratio, 0.0)
     source_stec_eval = test_df[args.source_stec_column].to_numpy(dtype=np.float64)
@@ -763,6 +984,15 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     predictions = test_df.copy()
     predictions["set_ratio_slant_identity_delta"] = slant_identity_delta
     predictions["set_ratio_vertical_identity_delta"] = vertical_identity_delta
+    predictions["set_ratio_slant_slm_ratio"] = slm_slant_ratio
+    predictions["set_ratio_vertical_slm_ratio"] = slm_vertical_ratio
+    predictions["set_ratio_slant_model_output"] = slant_model_output
+    predictions["set_ratio_vertical_model_output"] = vertical_model_output
+    predictions["set_ratio_elevation_shrinkage_strength"] = shrinkage_strength
+    predictions["set_ratio_slant_correction_raw"] = slant_correction_raw
+    predictions["set_ratio_vertical_correction_raw"] = vertical_correction_raw
+    predictions["set_ratio_slant_correction"] = slant_correction
+    predictions["set_ratio_vertical_correction"] = vertical_correction
     predictions["set_ratio_slant_ratio"] = slant_ratio
     predictions["set_ratio_vertical_ratio"] = vertical_ratio
     predictions["stec_set_ratio_mlp"] = source_stec_eval * slant_ratio
@@ -799,9 +1029,10 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
 
     metadata: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "mode": "simulation_set_context_source_ratio_hard_identity"
-        if args.hard_identity_ratio else "simulation_set_context_source_ratio",
+        "mode": f"simulation_set_context_{args.target_mode}"
+        + ("_hard_identity" if args.hard_identity_ratio else ""),
         "model": "set_ratio_mlp",
+        "target_mode": args.target_mode,
         "run_name": run_name,
         "input_file": str(input_path),
         "source_stec_column": args.source_stec_column,
@@ -812,13 +1043,12 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         "vtec_prediction_column": "vtec_set_ratio_mlp",
         "conversion_ratio_column": "set_ratio_vertical_ratio",
         "conversion_interpretation": (
-            "Set/context source-ratio model: context observed rays include an "
-            "is_source_anchor flag. Training target is target_STEC/source_STEC "
-            "for nearby slant-ray pairs. VTEC is source_STEC times the "
-            "predicted vertical ratio. If hard_identity_ratio is enabled, "
-            "ratio = 1 + identity_delta * neural_residual, so identical "
-            "source/query rays have ratio exactly 1. vtec_iri_ref is "
-            "evaluation-only."
+            "Set/context model: context observed rays include an is_source_anchor "
+            "flag. In source_ratio mode, the training target is "
+            "target_STEC/source_STEC. In slm_correction mode, the training "
+            "target is (target_STEC/source_STEC) divided by the SLM geometric "
+            "ratio, and inference multiplies the predicted correction by the "
+            "SLM source-to-query ratio. vtec_iri_ref is evaluation-only."
         ),
         "vtec_reference_used_for_training": False,
         "vertical_top_km": float(args.vertical_top_km),
@@ -835,6 +1065,13 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "train_pair_examples": int(len(Y)),
         },
         "hyperparameters": {
+            "target_mode": args.target_mode,
+            "correction_regularization": float(args.correction_regularization),
+            "elevation_shrinkage": bool(args.elevation_shrinkage),
+            "shrinkage_start_deg": float(args.shrinkage_start_deg),
+            "shrinkage_end_deg": float(args.shrinkage_end_deg),
+            "shrinkage_power": float(args.shrinkage_power),
+            "shrinkage_min_strength": float(args.shrinkage_min_strength),
             "epochs": int(args.epochs),
             "batch_size": int(args.batch_size),
             "learning_rate": float(args.learning_rate),
@@ -853,6 +1090,12 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "hard_identity_ratio": bool(args.hard_identity_ratio),
             "identity_delta_ipp_scale_km": float(args.identity_delta_ipp_scale_km),
             "inference_context": args.inference_context,
+            "min_train_elevation_deg": None
+            if args.min_train_elevation_deg is None
+            else float(args.min_train_elevation_deg),
+            "min_eval_elevation_deg": None
+            if args.min_eval_elevation_deg is None
+            else float(args.min_eval_elevation_deg),
         },
         "history": history,
         "identity_delta_stats": {
@@ -863,8 +1106,19 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
                 slant_ratio, slant_identity_delta
             ),
         },
+        "elevation_shrinkage_stats": {
+            "enabled": shrinkage_enabled,
+            "strength": _finite_stats(shrinkage_strength),
+            "raw_vertical_correction": _finite_stats(vertical_correction_raw),
+            "shrunk_vertical_correction": _finite_stats(vertical_correction),
+        },
         "metrics": {
-            "train_pair_ratio": regression_metrics(Y, train_pred_ratio),
+            "train_pair_training_target": regression_metrics(Y, train_pred_label),
+            (
+                "train_pair_ratio"
+                if args.target_mode == "source_ratio"
+                else "train_pair_slm_correction"
+            ): regression_metrics(Y, train_pred_label),
             "test_slant_stec": regression_metrics(
                 predictions[args.slant_target_column],
                 predictions["stec_set_ratio_mlp"],
@@ -913,7 +1167,30 @@ def parse_args(argv=None):
     p.add_argument("--baseline-vtec-column", default="vtec_slm_from_iri_stec")
     p.add_argument("--mapping-column", default="slm_mapping_factor_iri")
     p.add_argument("--vertical-top-km", type=float, default=2000.0)
-    p.add_argument("--split", choices=["random", "time", "station", "prn"], default="random")
+    p.add_argument(
+        "--target-mode",
+        choices=["source_ratio", "slm_correction"],
+        default="source_ratio",
+        help="Train either direct source-to-query ratio or correction to SLM geometry.",
+    )
+    p.add_argument(
+        "--correction-regularization",
+        type=float,
+        default=0.0,
+        help="For target-mode=slm_correction, penalize deviations from correction=1.",
+    )
+    p.add_argument(
+        "--elevation-shrinkage",
+        action="store_true",
+        help="Shrink SLM-correction outputs toward 1 as source elevation increases.",
+    )
+    p.add_argument("--shrinkage-start-deg", type=float, default=30.0)
+    p.add_argument("--shrinkage-end-deg", type=float, default=90.0)
+    p.add_argument("--shrinkage-power", type=float, default=1.0)
+    p.add_argument("--shrinkage-min-strength", type=float, default=0.0)
+    p.add_argument("--min-train-elevation-deg", type=float)
+    p.add_argument("--min-eval-elevation-deg", type=float)
+    p.add_argument("--split", choices=["random", "time", "station", "prn", "all"], default="random")
     p.add_argument("--test-keys-from")
     p.add_argument("--test-key-columns", default="timestamp,station,prn")
     p.add_argument("--test-size", type=float, default=0.2)
