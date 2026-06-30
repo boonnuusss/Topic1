@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 try:
     from .evaluate import build_vtec_metrics
@@ -354,6 +355,180 @@ def _scale_obs(OF: np.ndarray, OM: np.ndarray, o_imp: Any, o_scaler: Any) -> np.
     return out
 
 
+def _anchor_source_geometry(
+    obs_feat: np.ndarray,
+    obs_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the source-anchor geometry from an unscaled observation tensor."""
+
+    n = len(obs_feat)
+    source_geom = np.zeros((n, len(QUERY_FEATURE_COLS)), dtype=np.float64)
+    has_anchor = np.zeros(n, dtype=bool)
+    has_valid = obs_mask.any(axis=1)
+    for i in range(n):
+        if not has_valid[i]:
+            continue
+        anchor_mask = obs_mask[i] & (obs_feat[i, :, -1] > 0.5)
+        if anchor_mask.any():
+            j = int(np.where(anchor_mask)[0][0])
+            has_anchor[i] = True
+        else:
+            j = int(np.where(obs_mask[i])[0][0])
+        source_geom[i] = obs_feat[i, j, : len(QUERY_FEATURE_COLS)]
+    return source_geom, has_anchor
+
+
+def compute_identity_delta(
+    query_geom: np.ndarray,
+    obs_feat: np.ndarray,
+    obs_mask: np.ndarray,
+    *,
+    ipp_scale_km: float = 200.0,
+) -> np.ndarray:
+    """Geometry distance used in ratio = 1 + delta * residual.
+
+    The value is exactly zero when the query ray geometry is identical to the
+    source-anchor ray geometry.  It grows with IPP separation, elevation change,
+    slant-factor change, ray-length change, and LOS direction change.
+    """
+
+    source_geom, _ = _anchor_source_geometry(obs_feat, obs_mask)
+    q = np.asarray(query_geom, dtype=np.float64)
+    s = source_geom
+
+    ipp_lon_i = QUERY_FEATURE_COLS.index("ipp_lon")
+    ipp_lat_i = QUERY_FEATURE_COLS.index("ipp_lat")
+    elev_i = QUERY_FEATURE_COLS.index("elevation")
+    slant_i = QUERY_FEATURE_COLS.index("slant_factor")
+    ray_i = QUERY_FEATURE_COLS.index("ray_length")
+    los_i = [
+        QUERY_FEATURE_COLS.index("los_x"),
+        QUERY_FEATURE_COLS.index("los_y"),
+        QUERY_FEATURE_COLS.index("los_z"),
+    ]
+
+    ipp_delta = _haversine_km(
+        s[:, ipp_lon_i],
+        s[:, ipp_lat_i],
+        q[:, ipp_lon_i],
+        q[:, ipp_lat_i],
+    ) / max(float(ipp_scale_km), 1e-6)
+    elev_delta = np.abs(q[:, elev_i] - s[:, elev_i]) / 90.0
+    slant_delta = np.abs(q[:, slant_i] - s[:, slant_i]) / np.maximum(
+        np.abs(s[:, slant_i]), 1e-6
+    )
+    ray_delta = np.abs(q[:, ray_i] - s[:, ray_i]) / np.maximum(
+        np.abs(s[:, ray_i]), 1e-6
+    )
+    los_delta = np.linalg.norm(q[:, los_i] - s[:, los_i], axis=1) / 2.0
+    delta = np.sqrt(
+        ipp_delta**2 + elev_delta**2 + slant_delta**2 + ray_delta**2 + los_delta**2
+    )
+    delta[~obs_mask.any(axis=1)] = 1.0
+    delta[np.abs(delta) < 1e-12] = 0.0
+    return delta.astype(np.float64)
+
+
+def _finite_stats(values: np.ndarray) -> dict[str, Any]:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return {"n": 0, "mean": None, "min": None, "max": None}
+    return {
+        "n": int(finite.size),
+        "mean": float(np.mean(finite)),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+    }
+
+
+def _ratio_identity_stats(ratio: np.ndarray, delta: np.ndarray) -> dict[str, Any]:
+    ratio = np.asarray(ratio, dtype=np.float64)
+    delta = np.asarray(delta, dtype=np.float64)
+    identity = np.isfinite(delta) & (np.abs(delta) <= 1e-12)
+    if not identity.any():
+        return {"n_identity": 0, "ratio": _finite_stats(np.array([], dtype=np.float64))}
+    return {
+        "n_identity": int(np.count_nonzero(identity)),
+        "ratio": _finite_stats(ratio[identity]),
+        "abs_error_to_one": _finite_stats(np.abs(ratio[identity] - 1.0)),
+    }
+
+
+class _SetDeltaDataset(Dataset):
+    def __init__(self, q_geom, obs_feat, obs_mask, obs_dists, labels, deltas):
+        self._q = q_geom.copy()
+        self._o = obs_feat.copy()
+        self._m = obs_mask.copy()
+        self._d = obs_dists.copy()
+        self._y = labels.copy()
+        self._g = deltas.copy()
+
+    def __len__(self):
+        return len(self._q)
+
+    def __getitem__(self, idx):
+        return (
+            self._q[idx],
+            self._o[idx],
+            self._m[idx],
+            self._d[idx],
+            self._y[idx],
+            self._g[idx],
+        )
+
+
+def _collate_delta(batch):
+    qg, of, om, od, y, gd = zip(*batch)
+    return (
+        torch.tensor(np.stack(qg), dtype=torch.float32),
+        torch.tensor(np.stack(of), dtype=torch.float32),
+        torch.tensor(np.stack(om), dtype=torch.bool),
+        torch.tensor(np.stack(od), dtype=torch.float32),
+        torch.tensor(np.array(y), dtype=torch.float32).view(-1, 1),
+        torch.tensor(np.array(gd), dtype=torch.float32).view(-1, 1),
+    )
+
+
+def _make_delta_loader(ds, batch_size, seed, shuffle=True):
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=False,
+        collate_fn=_collate_delta,
+        generator=g,
+    )
+
+
+def _predict_hard_identity_ratio(
+    model,
+    device,
+    q_geom,
+    obs_feat,
+    obs_mask,
+    obs_dists,
+    deltas,
+    batch_size=512,
+) -> np.ndarray:
+    preds = []
+    model.eval()
+    for start in range(0, len(q_geom), batch_size):
+        end = min(start + batch_size, len(q_geom))
+        qg = torch.tensor(q_geom[start:end], dtype=torch.float32, device=device)
+        of_ = torch.tensor(obs_feat[start:end], dtype=torch.float32, device=device)
+        om = torch.tensor(obs_mask[start:end], dtype=torch.bool, device=device)
+        od = torch.tensor(obs_dists[start:end], dtype=torch.float32, device=device)
+        gd = torch.tensor(deltas[start:end], dtype=torch.float32, device=device).view(-1, 1)
+        with torch.no_grad():
+            residual = model(qg, of_, om, od)
+            ratio = 1.0 + gd * residual
+        preds.append(ratio.cpu().numpy())
+    return np.concatenate(preds, axis=0).ravel()
+
+
 def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     set_random_seed(args.seed)
     input_path = Path(args.input)
@@ -405,22 +580,36 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     q_scaler = StandardScaler()
     o_imp = SimpleImputer(strategy="median")
     o_scaler = StandardScaler()
-    y_scaler = StandardScaler()
+    y_scaler = None if args.hard_identity_ratio else StandardScaler()
 
     QG_scaled = q_scaler.fit_transform(q_imp.fit_transform(QG)).astype(np.float64)
     obs_valid = OF.reshape(-1, OF.shape[-1])[OM.ravel()]
     o_imp.fit(obs_valid)
     o_scaler.fit(o_imp.transform(obs_valid))
     OF_scaled = _scale_obs(OF, OM, o_imp, o_scaler)
-    Y_scaled = y_scaler.fit_transform(Y.reshape(-1, 1)).ravel().astype(np.float64)
+    identity_delta = compute_identity_delta(
+        QG,
+        OF,
+        OM,
+        ipp_scale_km=args.identity_delta_ipp_scale_km,
+    )
 
     device = choose_device(args.device)
-    loader = _make_loader(
-        _SetDataset(QG_scaled, OF_scaled, OM, OD, Y_scaled),
-        args.batch_size,
-        args.seed,
-        shuffle=True,
-    )
+    if args.hard_identity_ratio:
+        loader = _make_delta_loader(
+            _SetDeltaDataset(QG_scaled, OF_scaled, OM, OD, Y.astype(np.float64), identity_delta),
+            args.batch_size,
+            args.seed,
+            shuffle=True,
+        )
+    else:
+        Y_scaled = y_scaler.fit_transform(Y.reshape(-1, 1)).ravel().astype(np.float64)
+        loader = _make_loader(
+            _SetDataset(QG_scaled, OF_scaled, OM, OD, Y_scaled),
+            args.batch_size,
+            args.seed,
+            shuffle=True,
+        )
     model = SetToQueryModel(
         dropout=args.dropout,
         spatial_length_scale_km=args.spatial_sigma_km,
@@ -437,14 +626,21 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         model.train()
         total_loss = 0.0
         total_count = 0
-        for qg, of_, om, od, yb in loader:
+        for batch in loader:
+            if args.hard_identity_ratio:
+                qg, of_, om, od, yb, gd = batch
+                gd = gd.to(device)
+            else:
+                qg, of_, om, od, yb = batch
+                gd = None
             qg = qg.to(device)
             of_ = of_.to(device)
             om = om.to(device)
             od = od.to(device)
             yb = yb.to(device)
             optimizer.zero_grad(set_to_none=True)
-            pred = model(qg, of_, om, od)
+            raw = model(qg, of_, om, od)
+            pred = 1.0 + gd * raw if args.hard_identity_ratio else raw
             loss = criterion(pred, yb)
             loss.backward()
             optimizer.step()
@@ -453,12 +649,24 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             total_count += bs
         history.append({"epoch": epoch, "train_loss": total_loss / max(total_count, 1)})
 
-    train_pred_scaled = _predict_set(
-        model, device, QG_scaled, OF_scaled, OM, OD, batch_size=args.batch_size
-    )
-    train_pred_ratio = y_scaler.inverse_transform(
-        train_pred_scaled.reshape(-1, 1)
-    ).ravel()
+    if args.hard_identity_ratio:
+        train_pred_ratio = _predict_hard_identity_ratio(
+            model,
+            device,
+            QG_scaled,
+            OF_scaled,
+            OM,
+            OD,
+            identity_delta,
+            batch_size=args.batch_size,
+        )
+    else:
+        train_pred_scaled = _predict_set(
+            model, device, QG_scaled, OF_scaled, OM, OD, batch_size=args.batch_size
+        )
+        train_pred_ratio = y_scaler.inverse_transform(
+            train_pred_scaled.reshape(-1, 1)
+        ).ravel()
 
     context_df = df if args.inference_context == "all_observed" else train_df
     test_slant_geom = test_df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
@@ -490,35 +698,71 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     vert_QG_scaled = q_scaler.transform(q_imp.transform(test_vert_geom)).astype(np.float64)
     slant_OF_scaled = _scale_obs(slant_OF, slant_OM, o_imp, o_scaler)
     vert_OF_scaled = _scale_obs(vert_OF, vert_OM, o_imp, o_scaler)
+    slant_identity_delta = compute_identity_delta(
+        test_slant_geom,
+        slant_OF,
+        slant_OM,
+        ipp_scale_km=args.identity_delta_ipp_scale_km,
+    )
+    vertical_identity_delta = compute_identity_delta(
+        test_vert_geom,
+        vert_OF,
+        vert_OM,
+        ipp_scale_km=args.identity_delta_ipp_scale_km,
+    )
 
-    slant_ratio = y_scaler.inverse_transform(
-        _predict_set(
+    if args.hard_identity_ratio:
+        slant_ratio = _predict_hard_identity_ratio(
             model,
             device,
             slant_QG_scaled,
             slant_OF_scaled,
             slant_OM,
             slant_OD,
+            slant_identity_delta,
             batch_size=args.batch_size,
-        ).reshape(-1, 1)
-    ).ravel()
-    vertical_ratio = y_scaler.inverse_transform(
-        _predict_set(
+        )
+        vertical_ratio = _predict_hard_identity_ratio(
             model,
             device,
             vert_QG_scaled,
             vert_OF_scaled,
             vert_OM,
             vert_OD,
+            vertical_identity_delta,
             batch_size=args.batch_size,
-        ).reshape(-1, 1)
-    ).ravel()
+        )
+    else:
+        slant_ratio = y_scaler.inverse_transform(
+            _predict_set(
+                model,
+                device,
+                slant_QG_scaled,
+                slant_OF_scaled,
+                slant_OM,
+                slant_OD,
+                batch_size=args.batch_size,
+            ).reshape(-1, 1)
+        ).ravel()
+        vertical_ratio = y_scaler.inverse_transform(
+            _predict_set(
+                model,
+                device,
+                vert_QG_scaled,
+                vert_OF_scaled,
+                vert_OM,
+                vert_OD,
+                batch_size=args.batch_size,
+            ).reshape(-1, 1)
+        ).ravel()
 
     slant_ratio = np.maximum(slant_ratio, 0.0)
     vertical_ratio = np.maximum(vertical_ratio, 0.0)
     source_stec_eval = test_df[args.source_stec_column].to_numpy(dtype=np.float64)
 
     predictions = test_df.copy()
+    predictions["set_ratio_slant_identity_delta"] = slant_identity_delta
+    predictions["set_ratio_vertical_identity_delta"] = vertical_identity_delta
     predictions["set_ratio_slant_ratio"] = slant_ratio
     predictions["set_ratio_vertical_ratio"] = vertical_ratio
     predictions["stec_set_ratio_mlp"] = source_stec_eval * slant_ratio
@@ -555,7 +799,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
 
     metadata: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "mode": "simulation_set_context_source_ratio",
+        "mode": "simulation_set_context_source_ratio_hard_identity"
+        if args.hard_identity_ratio else "simulation_set_context_source_ratio",
         "model": "set_ratio_mlp",
         "run_name": run_name,
         "input_file": str(input_path),
@@ -570,7 +815,10 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "Set/context source-ratio model: context observed rays include an "
             "is_source_anchor flag. Training target is target_STEC/source_STEC "
             "for nearby slant-ray pairs. VTEC is source_STEC times the "
-            "predicted vertical ratio. vtec_iri_ref is evaluation-only."
+            "predicted vertical ratio. If hard_identity_ratio is enabled, "
+            "ratio = 1 + identity_delta * neural_residual, so identical "
+            "source/query rays have ratio exactly 1. vtec_iri_ref is "
+            "evaluation-only."
         ),
         "vtec_reference_used_for_training": False,
         "vertical_top_km": float(args.vertical_top_km),
@@ -602,9 +850,19 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             if args.max_pair_examples is not None else None,
             "spatial_sigma_km": float(args.spatial_sigma_km),
             "include_identity": bool(not args.no_identity),
+            "hard_identity_ratio": bool(args.hard_identity_ratio),
+            "identity_delta_ipp_scale_km": float(args.identity_delta_ipp_scale_km),
             "inference_context": args.inference_context,
         },
         "history": history,
+        "identity_delta_stats": {
+            "train": _finite_stats(identity_delta),
+            "test_slant": _finite_stats(slant_identity_delta),
+            "test_vertical": _finite_stats(vertical_identity_delta),
+            "test_slant_identity_ratio": _ratio_identity_stats(
+                slant_ratio, slant_identity_delta
+            ),
+        },
         "metrics": {
             "train_pair_ratio": regression_metrics(Y, train_pred_ratio),
             "test_slant_stec": regression_metrics(
@@ -681,6 +939,8 @@ def parse_args(argv=None):
     p.add_argument("--nearby-max-neighbors", type=int, default=30)
     p.add_argument("--max-pair-examples", type=int)
     p.add_argument("--no-identity", action="store_true")
+    p.add_argument("--hard-identity-ratio", action="store_true")
+    p.add_argument("--identity-delta-ipp-scale-km", type=float, default=200.0)
     p.add_argument("--spatial-sigma-km", type=float, default=100.0)
     p.add_argument("--inference-context", choices=["train", "all_observed"], default="all_observed")
     return p.parse_args(argv)

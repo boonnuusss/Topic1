@@ -112,6 +112,7 @@ Current single-epoch UT05:00 modeling status:
 | Low-elevation hybrid30 | Random-split diagnostic | Best earlier UT05:00 random-split RMSE was 1.99 TECU, but the 20-30 deg bin can degrade stricter splits. |
 | Set-to-query absolute model | Secondary/diagnostic route | Absolute-STEC set-to-query slightly surpasses SLM, but source-ratio formulation is now stronger. |
 | Neighbor context in set-ratio model | Diagnostic | Small context (`100 km`, `5` obs) is competitive, but larger context degraded VTEC; context aggregation needs more design. |
+| Hard identity set-ratio model | Diagnostic / not mainline | Enforces same-ray ratio exactly 1, but worsens UT05:00 random VTEC RMSE to 3.22 TECU; keep as a failed hard-constraint test. |
 | FNN/GNN notebook ports | Diagnostics | Useful implementation checks, but not current leading routes. |
 
 Current strict split summary for RayMLP source-ratio plus gated hybrid20 uses the with-self nearby default. These hybrid numbers are retained mainly to diagnose low-elevation behavior in IRI simulation. Because real observations do not include VTEC truth, selecting among hybrid gates by `vtec_iri_ref` performance is not a transferable operational strategy:

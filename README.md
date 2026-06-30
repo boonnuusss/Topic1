@@ -247,6 +247,7 @@ Current UT05:00 random-split benchmark status:
 | --- | ---: | ---: | --- |
 | SLM baseline | 2.44 | 0.961 | Traditional reference |
 | Set-ratio MLP, source anchor only, 100ep | 1.51 | 0.985 | Best current UT05 random pure model; source-ratio set architecture with one anchor observation |
+| Set-ratio MLP, hard identity anchor1, 100ep | 3.22 | 0.932 | Diagnostic; enforces same-ray ratio exactly 1 but worsens vertical-query VTEC |
 | Set-ratio MLP, ctx100 obs5, 100ep | 2.10 | 0.971 | Small context helps SLM but is worse than anchor-only |
 | RayMLP source-ratio nearby200, 100ep, with self-pairs | 2.13 | 0.970 | Default nearby behavior; self-pair ratio is exactly 1 in this simulation |
 | RayMLP source-ratio nearby200, 100ep, no self-pairs | 3.25 | 0.931 | Diagnostic; pure VTEC conversion worsens |

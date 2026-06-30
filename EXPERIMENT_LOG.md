@@ -2285,3 +2285,120 @@ Use `src.train_set_ratio_mlp` as the leading pure-ML route for the next strict
 validation round. Start with the anchor-only configuration, then test whether
 carefully constrained neighbor context can improve robustness without tuning
 against VTEC truth.
+
+## 2026-06-30 Experiment 035: Hard Identity Ratio Constraint
+
+### Purpose
+
+Test whether the source-ratio set model should enforce the physical identity
+constraint directly:
+
+```text
+ratio = 1 + identity_delta * neural_residual
+```
+
+Here `identity_delta` is a geometry-difference scalar computed from IPP distance,
+elevation, slant factor, ray length, and LOS direction. For identical source and
+query rays, `identity_delta = 0`, so the predicted ratio is exactly `1`
+regardless of neural-network output.
+
+### Code Change
+
+`src.train_set_ratio_mlp` now has a diagnostic switch:
+
+```powershell
+--hard-identity-ratio
+```
+
+When enabled, training is performed in raw ratio space with:
+
+```text
+loss = MSE(1 + identity_delta * residual, target_STEC / source_STEC)
+```
+
+The output table also records `set_ratio_slant_identity_delta` and
+`set_ratio_vertical_identity_delta` for checking whether the identity constraint
+is active.
+
+### Validation
+
+Compile check passed:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_set_ratio_mlp.py
+```
+
+Smoke test on `--max-rows 300 --epochs 2` confirmed that all slant self-query
+rows have exact identity behavior:
+
+```text
+test_slant_identity_delta: min = 0, max = 0
+set_ratio_slant_ratio: mean = 1.0, min = 1.0, max = 1.0
+abs_error_to_one: mean = 0.0, max = 0.0
+```
+
+### Full UT05:00 Random-Split Setup
+
+The hard-identity run used the same anchor-only configuration as the current
+best soft set-ratio run:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_anchor1_e100_hard_identity `
+  --split random `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --hard-identity-ratio `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+### Overall Results
+
+| Route | VTEC RMSE | VTEC MAE | Bias | R2 | Slant self-query ratio |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SLM baseline | 2.4400 | 1.4326 | +1.1364 | 0.9610 | n/a |
+| Soft set-ratio anchor1 | 1.5060 | 1.0912 | +0.0200 | 0.9851 | mean 1.0064, RMSE-to-1 0.0130 |
+| Hard identity set-ratio anchor1 | 3.2156 | 2.2625 | +0.0704 | 0.9323 | exactly 1.0 |
+
+The hard-identity model fits training pair ratios well (`train_pair_ratio` RMSE
+`0.0410`, R2 `0.9813`) and gives perfect slant self-query STEC on the test set.
+However, the vertical-query VTEC result is worse than both the soft set-ratio
+model and the SLM baseline.
+
+### Elevation-Bin Comparison
+
+| Elevation bin | n | SLM RMSE | Soft anchor RMSE | Hard identity RMSE | Hard vs soft |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| [10,20) | 49 | 5.8390 | 2.2317 | 5.4926 | +3.2609 |
+| [20,30) | 68 | 2.8787 | 2.0302 | 3.9213 | +1.8911 |
+| [30,40) | 64 | 1.4483 | 1.4354 | 3.8543 | +2.4189 |
+| [40,50) | 69 | 0.9515 | 1.2724 | 2.7488 | +1.4764 |
+| [50,60) | 78 | 0.7676 | 1.2834 | 1.8574 | +0.5741 |
+| [60,70) | 49 | 0.5748 | 0.9253 | 0.9459 | +0.0206 |
+| [70,80) | 28 | 0.2135 | 0.6142 | 0.5017 | -0.1125 |
+| [80,90) | 14 | 0.1333 | 0.3195 | 1.0877 | +0.7681 |
+
+### Interpretation
+
+The hard constraint is mechanically feasible and exactly enforces the same-ray
+identity ratio. But in this UT05:00 random split it is not useful for the main
+STEC-to-VTEC objective. It appears to over-constrain the source self-query while
+not improving the vertical query, which is the actual conversion target.
+
+The earlier soft anchor-only model only learned the identity approximately, but
+that small freedom may act like calibration: its slant ratio is close to 1
+without forcing the vertical extrapolation through a rigid residual form.
+
+### Decision
+
+Do not replace the current soft `set_ratio_mlp_0500_anchor1_e100` route with the
+hard-identity variant. Keep `--hard-identity-ratio` as a diagnostic option. If
+identity constraints are revisited, test softer physics penalties or a mapping-
+aware parameterization rather than an exact zero-delta residual constraint.
