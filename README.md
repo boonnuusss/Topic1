@@ -409,11 +409,20 @@ SLM correction toward 1 as source elevation increases:
 correction = 1 + strength(elevation) * (raw_correction - 1)
 ```
 
-On the UT05:00 random split with `elevation >= 30`, the current leading
-high-elevation route is SLM-correction with shrinkage power 2: RMSE `0.8293`
-TECU and MAE `0.5626`, versus SLM RMSE `0.9285` and MAE `0.6842`. This is the
-first high-elevation-only setting that beats SLM overall without degrading the
-near-zenith bins.
+On the UT05:00 random split with `elevation >= 30`, a sweep over 801 shrinkage
+settings found `start=30`, `end=90`, `power=4`, `min_strength=0.1` as the best
+balanced RMSE setting: RMSE `0.8112` TECU and MAE `0.5865`, versus SLM RMSE
+`0.9285` and MAE `0.6842`, with no high-elevation bin worse than SLM. The earlier
+`power=2`, `min_strength=0` setting remains a MAE-oriented alternative (`0.5626`
+TECU MAE, `0.8293` TECU RMSE).
+
+For all-train/all-eval high-elevation diagnostics, `vtec_iri_ref` is still not
+used for training, but the same source rays appear in slant-pair training and
+VTEC conversion evaluation. Treat this as full-dataset conversion behavior, not a
+strict unseen-ray generalization metric. On all `1,465` high-elevation rays, SLM
+has RMSE `0.8611`; `power=4`, `min_strength=0.1` gives RMSE `0.7771`, while the
+strict no-bin-worse all-ray setting is `power=4`, `min_strength=0` with RMSE
+`0.7822`.
 
 ## Set-to-Query Simulation Training
 

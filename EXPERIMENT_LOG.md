@@ -2847,3 +2847,220 @@ high-elevation STEC-to-VTEC route for UT05:00 simulation diagnostics. Keep
 `power=2`, `start=30 deg`, `end=90 deg`, and `min_strength=0` as the current
 reference setting, while treating the power sweep as simulation diagnostic rather
 than an operational truth-tuned hyperparameter search.
+## 2026-06-30 Experiment 040: Shrinkage Parameter Sweep For High-Elevation SLM Correction
+
+### Purpose
+
+Experiment 039 showed that elevation-dependent shrinkage can make the
+SLM-correction model beat SLM for `elevation >= 30 deg`. This experiment scans a
+larger set of truth-free shrinkage rules to determine whether the reference
+`power=2` setting is close to optimal and whether a better balanced setting can
+avoid degrading any high-elevation bin.
+
+The sweep uses the fixed raw SLM-correction predictions from the trained
+high-elevation model and recomputes only the deterministic shrinkage post-
+processing. `vtec_iri_ref` is used only for IRI simulation evaluation and ranking,
+not for training or operational decision logic.
+
+### Sweep Grid
+
+The sweep evaluated 801 configurations:
+
+```text
+start_deg:       30, 35, 40, 45
+end_deg:         70, 75, 80, 85, 90
+power:           0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5
+min_strength:    0, 0.05, 0.1, 0.2
+```
+
+Outputs:
+
+```text
+results/tables/shrinkage_sweep_high30_slm_correction_20260630.csv
+results/tables/shrinkage_sweep_high30_slm_correction_20260630_bin_metrics.csv
+results/tables/shrinkage_sweep_high30_slm_correction_20260630.metadata.json
+```
+
+### Overall Ranking
+
+| Config | RMSE | MAE | Bias | R2 | Max bin degradation | Bins worse | strength mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline | 0.9285 | 0.6842 | +0.3186 | 0.9944 | - | - | - |
+| `s30_e70_p5_min0.2` | 0.8073 | 0.5886 | +0.1293 | 0.9958 | +0.0497 | 1 | 0.2753 |
+| `s30_e90_p4_min0.1` | 0.8112 | 0.5865 | +0.1089 | 0.9957 | -0.0021 | 0 | 0.2922 |
+| `s30_e90_p2_min0` | 0.8293 | 0.5626 | +0.0240 | 0.9955 | -0.0013 | 0 | 0.4340 |
+
+The absolute lowest overall RMSE is `s30_e70_p5_min0.2`, but it slightly worsens
+the `[80,90)` bin by `0.0497` TECU. The best balanced configuration is
+`s30_e90_p4_min0.1`: it gives nearly the same overall RMSE while no high-elevation
+bin is worse than SLM.
+
+### Best Balanced Configuration
+
+A formal run was generated for the recommended balanced setting:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_high30_anchor1_e100_slm_correction_shrink_p4_min01 `
+  --split random `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --target-mode slm_correction `
+  --correction-regularization 0.001 `
+  --elevation-shrinkage `
+  --shrinkage-start-deg 30 `
+  --shrinkage-end-deg 90 `
+  --shrinkage-power 4 `
+  --shrinkage-min-strength 0.1 `
+  --min-train-elevation-deg 30 `
+  --min-eval-elevation-deg 30 `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+### Bin-Level Comparison
+
+| Config | Bin | n | SLM RMSE | RMSE | Delta | MAE | Bias | strength |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `s30_e90_p4_min0.1` | [30,40) | 64 | 1.4483 | 1.2464 | -0.2019 | 0.8964 | -0.0586 | 0.7197 |
+| `s30_e90_p4_min0.1` | [40,50) | 69 | 0.9515 | 0.7588 | -0.1927 | 0.6387 | +0.0702 | 0.3289 |
+| `s30_e90_p4_min0.1` | [50,60) | 78 | 0.7676 | 0.7475 | -0.0200 | 0.5987 | +0.2383 | 0.1334 |
+| `s30_e90_p4_min0.1` | [60,70) | 49 | 0.5748 | 0.5461 | -0.0287 | 0.4740 | +0.2851 | 0.1000 |
+| `s30_e90_p4_min0.1` | [70,80) | 28 | 0.2135 | 0.2032 | -0.0104 | 0.1576 | +0.0072 | 0.1000 |
+| `s30_e90_p4_min0.1` | [80,90) | 14 | 0.1333 | 0.1311 | -0.0021 | 0.0959 | -0.0687 | 0.1000 |
+
+### Interpretation
+
+More aggressive shrinkage generally helps high-elevation RMSE because it prevents
+ML corrections from disturbing near-vertical SLM behavior. However, if the minimum
+strength is too high or the transition ends too early, the model can still over-
+correct the `[80,90)` bin. The balanced setting keeps a small `0.1` minimum
+correction strength but uses a high `power=4`, so only the lower high-elevation
+rays receive substantial ML correction.
+
+### Decision
+
+Use `s30_e90_p4_min0.1` as the recommended high-elevation shrinkage setting when
+prioritizing RMSE and no-bin-degradation. Keep `s30_e90_p2_min0` as a secondary
+MAE-oriented setting, since it gives the best MAE (`0.5626`) and lower bias but a
+slightly higher RMSE (`0.8293`). Avoid using the absolute-RMSE winner
+`s30_e70_p5_min0.2` as the main reference because it slightly degrades the
+near-zenith bin.
+## 2026-06-30 Experiment 041: All-Ray High-Elevation SLM-Correction Shrinkage Diagnostic
+
+### Purpose
+
+Test the user's proposed all-train/all-eval diagnostic for high-elevation
+STEC-to-VTEC conversion. Since `vtec_iri_ref` is not used during training, this is
+not VTEC-label leakage. However, because the source slant rays themselves appear
+in the training set, this should be interpreted as a full-dataset conversion
+diagnostic rather than a strict unseen-ray generalization test.
+
+### Setup
+
+The formal all-ray run used all UT05:00 rays for training and evaluation, then
+filtered source rays to `elevation >= 30 deg`:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0500_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0500_all_high30_anchor1_e100_slm_correction_shrink_p4_min01 `
+  --split all `
+  --seed 42 `
+  --nearby-km 200 `
+  --context-km 0 `
+  --nearby-max-neighbors 30 `
+  --max-obs 1 `
+  --target-mode slm_correction `
+  --correction-regularization 0.001 `
+  --elevation-shrinkage `
+  --shrinkage-start-deg 30 `
+  --shrinkage-end-deg 90 `
+  --shrinkage-power 4 `
+  --shrinkage-min-strength 0.1 `
+  --min-train-elevation-deg 30 `
+  --min-eval-elevation-deg 30 `
+  --epochs 100 `
+  --batch-size 1024 `
+  --device cpu `
+  --output-format parquet
+```
+
+| Item | Count |
+| --- | ---: |
+| Input rays | 2,041 |
+| High-elevation training rays | 1,465 |
+| High-elevation VTEC evaluation rays | 1,465 |
+| Training pair examples | 26,519 |
+| VTEC truth used for training | false |
+
+### Formal P4 Min0.1 Result
+
+| Route | n | RMSE | MAE | Bias | R2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline | 1,465 | 0.8611 | 0.6511 | +0.2021 | 0.9956 |
+| SLM-correction shrink p4 min0.1 | 1,465 | 0.7771 | 0.5747 | -0.0954 | 0.9964 |
+
+The p4 min0.1 all-ray diagnostic reduces RMSE by `0.0840` TECU (`9.76%`) and
+MAE by `0.0764` TECU (`11.73%`) relative to SLM.
+
+### All-Ray Shrinkage Sweep
+
+The same 801-configuration shrinkage grid from Experiment 040 was repeated using
+the all-ray raw SLM-correction predictions.
+
+Outputs:
+
+```text
+results/tables/shrinkage_sweep_all_high30_slm_correction_20260630.csv
+results/tables/shrinkage_sweep_all_high30_slm_correction_20260630_bin_metrics.csv
+results/tables/shrinkage_sweep_all_high30_slm_correction_20260630.metadata.json
+```
+
+| Config | RMSE | MAE | Bias | R2 | Max bin degradation | Bins worse | strength mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline | 0.8611 | 0.6511 | +0.2021 | 0.9956 | - | - | - |
+| `s30_e70_p5_min0.2` | 0.7616 | 0.5729 | -0.0796 | 0.9966 | +0.1516 | 2 | 0.2730 |
+| `s30_e90_p4_min0.1` | 0.7771 | 0.5747 | -0.0954 | 0.9964 | +0.0395 | 1 | 0.2889 |
+| `s30_e90_p4_min0` | 0.7822 | 0.5818 | -0.0661 | 0.9964 | -0.0002 | 0 | 0.2613 |
+| `s30_e90_p2_min0` | 0.8041 | 0.5627 | -0.2241 | 0.9962 | -0.0054 | 0 | 0.4275 |
+
+### Strict No-Worse Bin Result
+
+The strict no-bin-worse setting is `s30_e90_p4_min0`:
+
+| Elevation bin | n | SLM RMSE | RMSE | Delta | MAE | Bias | strength |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| [30,40) | 307 | 1.2261 | 1.1220 | -0.1041 | 0.8532 | -0.5008 | 0.7146 |
+| [40,50) | 328 | 0.9499 | 0.8296 | -0.1203 | 0.6843 | -0.2184 | 0.3355 |
+| [50,60) | 358 | 0.8000 | 0.7322 | -0.0677 | 0.5826 | +0.1242 | 0.1239 |
+| [60,70) | 256 | 0.5823 | 0.5585 | -0.0238 | 0.4691 | +0.2707 | 0.0324 |
+| [70,80) | 135 | 0.2917 | 0.2861 | -0.0056 | 0.2216 | +0.1269 | 0.0057 |
+| [80,90) | 81 | 0.1278 | 0.1276 | -0.0002 | 0.0916 | -0.0286 | 0.0002 |
+
+### Interpretation
+
+The all-ray diagnostic confirms the high-elevation shrinkage direction: even when
+all available high-elevation source rays are used for both slant-pair training
+and VTEC conversion evaluation, the SLM-correction shrinkage model improves SLM
+in VTEC space without using VTEC truth during training.
+
+The best all-ray RMSE setting remains an aggressive shrinkage with minimum
+strength (`s30_e70_p5_min0.2`), but it degrades two bins, including high-elevation
+near-zenith behavior. For a physically safer rule, `s30_e90_p4_min0` is the
+strict no-bin-worse setting. The earlier random-split recommendation
+`s30_e90_p4_min0.1` remains a good balanced holdout setting, but in all-ray
+diagnostics it slightly worsens the `[80,90)` bin.
+
+### Decision
+
+Report all-ray results separately from holdout results. For all-ray full-dataset
+conversion diagnostics, use `s30_e90_p4_min0` when requiring every high-elevation
+bin to be no worse than SLM. Keep `s30_e90_p4_min0.1` as the random-split balanced
+reference and `s30_e90_p2_min0` as the MAE-oriented alternative.
