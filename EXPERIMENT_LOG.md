@@ -3380,3 +3380,270 @@ Keep `UT04:00-06:00`, `5min`, `100k pairs`, `30 epochs` as the current best
 multi-time high-elevation reference. Keep `UT05 +/-15min`, `30s`, `60 epochs` as
 the best local-window diagnostic. If local-window training is revisited, the next
 step should change the sampling or objective, not simply increase epochs further.
+
+## 2026-07-02 Experiment 046: Full-Day 5min Multi-Time Training
+
+### Purpose
+
+Test whether an even broader time range improves the current best high-elevation
+STEC-to-VTEC conversion route. Previous experiments suggested that the set-ratio
+SLM-correction model benefits from geometric and sampling diversity. This
+experiment therefore builds a true full-day `UT00:00-24:00`, `5min` IRI
+simulation dataset and compares it against the previous `UT04:00-06:00`, `5min`
+reference.
+
+### Dataset Build
+
+A new reproducible config was added:
+
+```text
+configs/full_day_5min.yaml
+```
+
+It builds a 5min ray-wise table from the observed TEC data and SP3 geometry. The
+`dataset_builder` writes the date-based filename by default, so the generated
+product was copied to the explicit experiment path:
+
+```text
+datasets/interim/raystec_china_20240505_0000_2400_5min.parquet
+```
+
+Ray-wise dataset checks:
+
+| Item | Value |
+| --- | ---: |
+| Rows | 597,668 |
+| Epochs | 288 |
+| Time range | 2024-05-05 00:00:00 to 23:55:00 |
+| High-elevation rows | 418,372 |
+| Stations | 112 |
+| PRNs | 100 |
+
+The IRI simulation product was then built with the regular-grid interpolator:
+
+```text
+datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet
+```
+
+IRI simulation checks:
+
+| Item | Value |
+| --- | ---: |
+| Rows | 597,668 |
+| Epochs | 288 |
+| Time range | 2024-05-05 00:00:00 to 23:55:00 |
+| High-elevation rows | 418,372 |
+| `ray_sample_spacing_km` | 2.5 |
+| IRI strategy | `regular_grid_interpolator` |
+
+The long IRI command exceeded the shell timeout after the output had already been
+written. The parquet and metadata were subsequently read successfully, and no
+Python training/build process remained active.
+
+### Smoke Test
+
+A first-3-epoch smoke subset was used before the formal training sweep:
+
+```text
+datasets/interim/iri_simulation_20240505_0000_0010_5min_spacing2p5_regular_smoke3.parquet
+```
+
+Smoke result:
+
+| Check | Value |
+| --- | ---: |
+| Training epochs | 3 |
+| Training pairs | 5,000 |
+| `same_epoch_pairs` | true |
+| `n_cross_epoch_pairs` | 0 |
+
+### Fixed Training Setup
+
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Train/eval elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` is evaluation-only and is not used for training.
+
+### Outputs
+
+```text
+results/tables/full_day_5min_epoch_sweep_20260702.csv
+results/tables/full_day_5min_epoch_sweep_best_20260702.csv
+```
+
+### Results
+
+| Route | Epochs | Pair cap | Per-epoch cap | RMSE | MAE | Bias | R2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLM baseline | - | - | - | 0.9285 | 0.6842 | +0.3186 | 0.9944 |
+| UT05-only tuned high30 shrink | 50 | 100k | 100000 | 0.8106 | 0.5920 | +0.1140 | 0.9957 |
+| UT05 +/-15min 30s tuned high30 shrink | 60 | 100k | 1640 | 0.6694 | 0.5153 | +0.2300 | 0.9971 |
+| UT04-06 5min high30 shrink | 30 | 100k | 4000 | 0.6180 | 0.4796 | +0.1702 | 0.9975 |
+| UT00-24 5min high30 shrink | 30 | 100k | 348 | 0.6387 | 0.5082 | +0.1859 | 0.9973 |
+| UT00-24 5min high30 shrink | 40 | 100k | 348 | 0.6480 | 0.5122 | +0.1671 | 0.9973 |
+| UT00-24 5min high30 shrink | 50 | 100k | 348 | 0.6799 | 0.5253 | +0.2369 | 0.9970 |
+| UT00-24 5min high30 shrink | 60 | 100k | 348 | 0.6060 | 0.4827 | +0.1893 | 0.9976 |
+| UT00-24 5min high30 shrink | 60 | 1.152M | 4000 | 0.6517 | 0.5098 | +0.2205 | 0.9972 |
+
+### Interpretation
+
+The full-day 5min experiment improves the best RMSE achieved so far. The best
+configuration is `UT00:00-24:00`, `5min`, `100k pairs`, `60 epochs`, with RMSE
+`0.6060` TECU. This is slightly better than the previous `UT04:00-06:00`, `5min`,
+`30 epochs` reference (`0.6180` TECU).
+
+The density-matched run did not help. Increasing the pair cap from `100k` to
+`1.152M` at the same `60 epochs` worsened RMSE from `0.6060` to `0.6517`. This
+suggests that the current set-ratio anchor-only model benefits from broad
+coverage plus sparse pair sampling as a regularizer. Matching the per-epoch pair
+density of the two-hour run appears to overfit the slant-pair correction target
+or amplify the mismatch between slant-pair fitting and vertical-query VTEC
+conversion.
+
+### Decision
+
+Promote `UT00:00-24:00`, `5min`, `100k pairs`, `60 epochs` as the new best
+high-elevation multi-time reference for this model family. Keep the density-
+matched result as a diagnostic failure: more pair examples are not automatically
+better for the current objective. Future improvements should explore sampling
+weights or objectives, not just larger pair caps.
+
+## 2026-07-02 Experiment 047: Density-Matched Full-Day 5min Epoch Extension
+
+### Purpose
+
+Experiment 046 found that the full-day `5min`, `100k pairs`, `60 epoch` run was
+the best configuration so far (`0.6060` RMSE), while the density-matched
+`1.152M pairs`, `60 epoch` run was worse (`0.6517` RMSE). A plausible concern is
+that the larger density-matched training set may need more epochs. This
+experiment extends the density-matched setting to `70`, `80`, and `90` epochs.
+
+### Fixed Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Pair cap: `1,152,000`, giving `same_epoch_per_epoch_cap = 4000`
+- Train/eval elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` is evaluation-only and is not used for training.
+
+### Outputs
+
+```text
+results/tables/full_day_5min_density_epoch_sweep_20260702.csv
+results/tables/full_day_5min_epoch_sweep_20260702.csv
+results/tables/full_day_5min_epoch_sweep_best_20260702.csv
+```
+
+### Results
+
+| Route | Epochs | Pair cap | RMSE | MAE | Bias | R2 | Train-pair RMSE | Final train loss |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Full-day 5min p100k | 60 | 100k | 0.6060 | 0.4827 | +0.1893 | 0.9976 | 0.0110 | 0.2629 |
+| Full-day 5min p1152k | 60 | 1.152M | 0.6517 | 0.5098 | +0.2205 | 0.9972 | 0.0103 | 0.1375 |
+| Full-day 5min p1152k | 70 | 1.152M | 0.6056 | 0.4824 | +0.1859 | 0.9976 | 0.0102 | 0.1314 |
+| Full-day 5min p1152k | 80 | 1.152M | 0.6295 | 0.4955 | +0.2135 | 0.9974 | 0.0096 | 0.1278 |
+| Full-day 5min p1152k | 90 | 1.152M | 0.6582 | 0.5101 | +0.2374 | 0.9972 | 0.0099 | 0.1233 |
+
+### Interpretation
+
+The user's concern was correct: `60 epochs` was not the best setting for the
+larger density-matched dataset. Increasing to `70 epochs` reduces RMSE from
+`0.6517` to `0.6056`, slightly beating the `100k pairs`, `60 epoch` result
+(`0.6060`). However, the improvement is extremely small (`0.0004` TECU), while
+runtime and training cost are much higher.
+
+The trend is not monotonic. Further increasing to `80` and `90` epochs worsens
+VTEC-space RMSE even though the final training loss continues to fall. This
+again shows that lower slant-pair training loss does not necessarily improve the
+source-to-vertical VTEC conversion objective.
+
+### Decision
+
+The absolute best current RMSE is now `UT00:00-24:00`, `5min`, `1.152M pairs`,
+`70 epochs` with RMSE `0.6056`. For practical iteration, the `100k pairs`,
+`60 epochs` run remains nearly equivalent (`0.6060`) and much cheaper. Report the
+70-epoch density-matched result as the formal best, but use the 100k/60ep setting
+as the efficient reference unless the final paper table needs the absolute
+minimum RMSE.
+
+## 2026-07-02 Experiment 048: Epoch-Level VTEC Diagnostics in One Training Run
+
+### Purpose
+
+Repeatedly rerunning the same model for `30/40/50/60/70/80/90` epochs is wasteful.
+`src.train_set_ratio_mlp` now supports checkpoint-style VTEC diagnostics during a
+single training run. The model still trains exactly as before; the new option only
+runs evaluation queries after selected epochs and writes a compact metrics table.
+
+### New CLI Options
+
+- `--epoch-metrics`: evaluate after every `--epoch-metrics-every` epochs.
+- `--epoch-metrics-every N`: default `1`, so every epoch is evaluated when enabled.
+- `--epoch-metrics-epochs 30,40,50,60,70,80,90`: evaluate only listed epochs; this
+  also enables epoch metrics.
+
+The output is:
+
+```text
+results/tables/<run_name>_epoch_metrics.csv
+```
+
+with columns:
+
+```text
+epoch, train_loss, rmse_tecu, mae_tecu, bias_tecu, r2, n_eval
+```
+
+### Validation
+
+Compiled successfully:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_set_ratio_mlp.py
+```
+
+Smoke run:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0000_0010_5min_spacing2p5_regular_smoke3.parquet `
+  --run-name smoke_epoch_metrics_set_ratio_e3 `
+  --split random --seed 42 `
+  --nearby-km 200 --context-km 0 --nearby-max-neighbors 30 --max-obs 1 `
+  --target-mode slm_correction --correction-regularization 0.001 `
+  --elevation-shrinkage --shrinkage-start-deg 30 --shrinkage-end-deg 90 `
+  --shrinkage-power 4 --shrinkage-min-strength 0.1 `
+  --min-train-elevation-deg 30 --min-eval-elevation-deg 30 `
+  --same-epoch-pairs --max-pair-examples 5000 `
+  --epochs 3 --epoch-metrics --epoch-metrics-every 1 `
+  --batch-size 1024 --device cpu --output-format parquet
+```
+
+Smoke CSV rows:
+
+| Epoch | Train loss | RMSE | MAE | Bias | R2 | N eval |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.9833 | 0.3814 | 0.2673 | +0.1379 | 0.9960 | 994 |
+| 2 | 0.7797 | 0.3763 | 0.2650 | +0.1322 | 0.9961 | 994 |
+| 3 | 0.7278 | 0.3591 | 0.2566 | +0.1101 | 0.9964 | 994 |
+
+### Recommended Use
+
+For the full-day density-matched question, run one longer training job and record
+the desired checkpoints, for example:
+
+```powershell
+--epochs 90 --epoch-metrics-epochs 60,70,80,90
+```
+
+This produces a directly comparable epoch curve without retraining from scratch
+for every epoch setting.

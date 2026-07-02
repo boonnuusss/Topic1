@@ -692,6 +692,190 @@ def apply_correction_shrinkage(
     strength = np.asarray(strength, dtype=np.float64)
     return 1.0 + strength * (correction - 1.0)
 
+def parse_epoch_metrics_epochs(spec: str | None, max_epoch: int) -> set[int]:
+    """Parse a comma-separated list of epochs for checkpoint diagnostics."""
+
+    if not spec:
+        return set()
+    epochs: set[int] = set()
+    for raw in str(spec).split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        epoch = int(item)
+        if epoch < 1 or epoch > max_epoch:
+            raise ValueError(
+                f"--epoch-metrics-epochs contains {epoch}, but valid range is "
+                f"1..{max_epoch}."
+            )
+        epochs.add(epoch)
+    return epochs
+
+
+def should_record_epoch_metrics(
+    epoch: int,
+    *,
+    enabled: bool,
+    every: int,
+    selected_epochs: set[int],
+    final_epoch: int,
+) -> bool:
+    """Return whether the current epoch should run VTEC diagnostics."""
+
+    if not enabled:
+        return False
+    if selected_epochs:
+        return epoch in selected_epochs
+    if every < 1:
+        raise ValueError("--epoch-metrics-every must be >= 1.")
+    return epoch % every == 0 or epoch == final_epoch
+
+
+def predict_model_output_label(
+    *,
+    model,
+    device,
+    q_geom_scaled: np.ndarray,
+    obs_feat_scaled: np.ndarray,
+    obs_mask: np.ndarray,
+    obs_dists: np.ndarray,
+    identity_delta: np.ndarray,
+    y_scaler,
+    hard_identity_ratio: bool,
+    batch_size: int,
+) -> np.ndarray:
+    """Predict either hard-identity labels or inverse-scaled model outputs."""
+
+    if hard_identity_ratio:
+        return _predict_hard_identity_ratio(
+            model,
+            device,
+            q_geom_scaled,
+            obs_feat_scaled,
+            obs_mask,
+            obs_dists,
+            identity_delta,
+            batch_size=batch_size,
+        )
+    pred_scaled = _predict_set(
+        model,
+        device,
+        q_geom_scaled,
+        obs_feat_scaled,
+        obs_mask,
+        obs_dists,
+        batch_size=batch_size,
+    )
+    return y_scaler.inverse_transform(pred_scaled.reshape(-1, 1)).ravel()
+
+
+def predict_set_ratio_conversion(
+    *,
+    model,
+    device,
+    y_scaler,
+    hard_identity_ratio: bool,
+    target_mode: str,
+    batch_size: int,
+    slant_QG_scaled: np.ndarray,
+    slant_OF_scaled: np.ndarray,
+    slant_OM: np.ndarray,
+    slant_OD: np.ndarray,
+    slant_identity_delta: np.ndarray,
+    vert_QG_scaled: np.ndarray,
+    vert_OF_scaled: np.ndarray,
+    vert_OM: np.ndarray,
+    vert_OD: np.ndarray,
+    vertical_identity_delta: np.ndarray,
+    slm_slant_ratio: np.ndarray,
+    slm_vertical_ratio: np.ndarray,
+    shrinkage_strength: np.ndarray,
+    source_stec_eval: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Run slant and vertical queries and convert source STEC to VTEC."""
+
+    slant_model_output = predict_model_output_label(
+        model=model,
+        device=device,
+        q_geom_scaled=slant_QG_scaled,
+        obs_feat_scaled=slant_OF_scaled,
+        obs_mask=slant_OM,
+        obs_dists=slant_OD,
+        identity_delta=slant_identity_delta,
+        y_scaler=y_scaler,
+        hard_identity_ratio=hard_identity_ratio,
+        batch_size=batch_size,
+    )
+    vertical_model_output = predict_model_output_label(
+        model=model,
+        device=device,
+        q_geom_scaled=vert_QG_scaled,
+        obs_feat_scaled=vert_OF_scaled,
+        obs_mask=vert_OM,
+        obs_dists=vert_OD,
+        identity_delta=vertical_identity_delta,
+        y_scaler=y_scaler,
+        hard_identity_ratio=hard_identity_ratio,
+        batch_size=batch_size,
+    )
+
+    slant_model_output = np.maximum(slant_model_output, 0.0)
+    vertical_model_output = np.maximum(vertical_model_output, 0.0)
+    if target_mode == "source_ratio":
+        slant_ratio = slant_model_output
+        vertical_ratio = vertical_model_output
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slant_correction_raw = np.divide(slant_ratio, slm_slant_ratio)
+            vertical_correction_raw = np.divide(vertical_ratio, slm_vertical_ratio)
+        slant_correction = slant_correction_raw
+        vertical_correction = vertical_correction_raw
+    else:
+        slant_correction_raw = slant_model_output
+        vertical_correction_raw = vertical_model_output
+        slant_correction = apply_correction_shrinkage(
+            slant_correction_raw, shrinkage_strength
+        )
+        vertical_correction = apply_correction_shrinkage(
+            vertical_correction_raw, shrinkage_strength
+        )
+        slant_ratio = slant_correction * slm_slant_ratio
+        vertical_ratio = vertical_correction * slm_vertical_ratio
+    slant_ratio = np.maximum(slant_ratio, 0.0)
+    vertical_ratio = np.maximum(vertical_ratio, 0.0)
+    return {
+        "slant_model_output": slant_model_output,
+        "vertical_model_output": vertical_model_output,
+        "slant_correction_raw": slant_correction_raw,
+        "vertical_correction_raw": vertical_correction_raw,
+        "slant_correction": slant_correction,
+        "vertical_correction": vertical_correction,
+        "slant_ratio": slant_ratio,
+        "vertical_ratio": vertical_ratio,
+        "stec_set_ratio_mlp": source_stec_eval * slant_ratio,
+        "vtec_set_ratio_mlp": source_stec_eval * vertical_ratio,
+    }
+
+
+def build_epoch_metric_row(
+    *,
+    epoch: int,
+    train_loss: float,
+    target_vtec: pd.Series | np.ndarray,
+    predicted_vtec: pd.Series | np.ndarray,
+) -> dict[str, float | int]:
+    """Create one compact row for epoch-level VTEC diagnostics."""
+
+    metrics = vtec_error_metrics(target_vtec, predicted_vtec)
+    return {
+        "epoch": int(epoch),
+        "train_loss": float(train_loss),
+        "rmse_tecu": float(metrics["rmse_tecu"]),
+        "mae_tecu": float(metrics["mae_tecu"]),
+        "bias_tecu": float(metrics["bias_tecu"]),
+        "r2": float(metrics["r2"]),
+        "n_eval": int(metrics["n_samples"]),
+    }
+
 
 class _SetDeltaDataset(Dataset):
     def __init__(self, q_geom, obs_feat, obs_mask, obs_dists, labels, deltas):
@@ -907,6 +1091,85 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         ipp_scale_km=args.identity_delta_ipp_scale_km,
     )
 
+    context_df = df if args.inference_context == "all_observed" else train_df
+    test_slant_geom = test_df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
+    test_vert_base = build_vertical_target_geometry(
+        test_df, vertical_top_km=args.vertical_top_km
+    )[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
+    test_vert_geom = np.column_stack(
+        [test_vert_base, test_df[TIME_COLS].to_numpy(dtype=np.float64)]
+    )
+
+    slant_OF, slant_OM, slant_OD, slant_context_stats = build_inference_context_sets(
+        test_df,
+        context_df,
+        target_geom=test_slant_geom,
+        obs_cols=obs_cols,
+        max_obs=args.max_obs,
+        context_radius_km=args.context_km,
+        same_epoch_context=args.same_epoch_pairs,
+    )
+    vert_OF, vert_OM, vert_OD, vert_context_stats = build_inference_context_sets(
+        test_df,
+        context_df,
+        target_geom=test_vert_geom,
+        obs_cols=obs_cols,
+        max_obs=args.max_obs,
+        context_radius_km=args.context_km,
+        same_epoch_context=args.same_epoch_pairs,
+    )
+
+    slant_QG_scaled = q_scaler.transform(q_imp.transform(test_slant_geom)).astype(np.float64)
+    vert_QG_scaled = q_scaler.transform(q_imp.transform(test_vert_geom)).astype(np.float64)
+    slant_OF_scaled = _scale_obs(slant_OF, slant_OM, o_imp, o_scaler)
+    vert_OF_scaled = _scale_obs(vert_OF, vert_OM, o_imp, o_scaler)
+    slant_identity_delta = compute_identity_delta(
+        test_slant_geom,
+        slant_OF,
+        slant_OM,
+        ipp_scale_km=args.identity_delta_ipp_scale_km,
+    )
+    vertical_identity_delta = compute_identity_delta(
+        test_vert_geom,
+        vert_OF,
+        vert_OM,
+        ipp_scale_km=args.identity_delta_ipp_scale_km,
+    )
+    mapping_i = QUERY_FEATURE_COLS.index("slant_factor")
+    source_mapping_eval = test_df[args.mapping_column].to_numpy(dtype=np.float64)
+    slant_target_mapping = test_slant_geom[:, mapping_i]
+    vertical_target_mapping = test_vert_geom[:, mapping_i]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slm_slant_ratio = np.divide(
+            slant_target_mapping,
+            source_mapping_eval,
+            out=np.full(len(test_df), np.nan, dtype=np.float64),
+            where=source_mapping_eval > 0,
+        )
+        slm_vertical_ratio = np.divide(
+            vertical_target_mapping,
+            source_mapping_eval,
+            out=np.full(len(test_df), np.nan, dtype=np.float64),
+            where=source_mapping_eval > 0,
+        )
+    source_elevation_eval = test_df["elevation"].to_numpy(dtype=np.float64)
+    shrinkage_enabled = bool(args.elevation_shrinkage and args.target_mode == "slm_correction")
+    shrinkage_strength = elevation_shrinkage_strength(
+        source_elevation_eval,
+        enabled=shrinkage_enabled,
+        start_deg=args.shrinkage_start_deg,
+        end_deg=args.shrinkage_end_deg,
+        power=args.shrinkage_power,
+        min_strength=args.shrinkage_min_strength,
+    )
+    source_stec_eval = test_df[args.source_stec_column].to_numpy(dtype=np.float64)
+    target_vtec_eval = test_df[args.vtec_target_column].to_numpy(dtype=np.float64)
+    epoch_metrics_enabled = bool(args.epoch_metrics or args.epoch_metrics_epochs)
+    epoch_metrics_epochs = parse_epoch_metrics_epochs(
+        args.epoch_metrics_epochs, args.epochs
+    )
+    epoch_metrics_rows: list[dict[str, float | int]] = []
+
     device = choose_device(args.device)
     if args.hard_identity_ratio:
         loader = _make_delta_loader(
@@ -981,7 +1244,53 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             bs = len(qg)
             total_loss += float(loss.detach().cpu()) * bs
             total_count += bs
-        history.append({"epoch": epoch, "train_loss": total_loss / max(total_count, 1)})
+        train_loss = total_loss / max(total_count, 1)
+        history.append({"epoch": epoch, "train_loss": train_loss})
+        if should_record_epoch_metrics(
+            epoch,
+            enabled=epoch_metrics_enabled,
+            every=args.epoch_metrics_every,
+            selected_epochs=epoch_metrics_epochs,
+            final_epoch=args.epochs,
+        ):
+            epoch_outputs = predict_set_ratio_conversion(
+                model=model,
+                device=device,
+                y_scaler=y_scaler,
+                hard_identity_ratio=args.hard_identity_ratio,
+                target_mode=args.target_mode,
+                batch_size=args.batch_size,
+                slant_QG_scaled=slant_QG_scaled,
+                slant_OF_scaled=slant_OF_scaled,
+                slant_OM=slant_OM,
+                slant_OD=slant_OD,
+                slant_identity_delta=slant_identity_delta,
+                vert_QG_scaled=vert_QG_scaled,
+                vert_OF_scaled=vert_OF_scaled,
+                vert_OM=vert_OM,
+                vert_OD=vert_OD,
+                vertical_identity_delta=vertical_identity_delta,
+                slm_slant_ratio=slm_slant_ratio,
+                slm_vertical_ratio=slm_vertical_ratio,
+                shrinkage_strength=shrinkage_strength,
+                source_stec_eval=source_stec_eval,
+            )
+            metric_row = build_epoch_metric_row(
+                epoch=epoch,
+                train_loss=train_loss,
+                target_vtec=target_vtec_eval,
+                predicted_vtec=epoch_outputs["vtec_set_ratio_mlp"],
+            )
+            epoch_metrics_rows.append(metric_row)
+            print(
+                "epoch_metrics "
+                f"epoch={metric_row['epoch']} "
+                f"train_loss={metric_row['train_loss']:.6g} "
+                f"rmse={metric_row['rmse_tecu']:.4f} "
+                f"mae={metric_row['mae_tecu']:.4f} "
+                f"bias={metric_row['bias_tecu']:+.4f} "
+                f"r2={metric_row['r2']:.4f}"
+            )
 
     if args.hard_identity_ratio:
         train_pred_label = _predict_hard_identity_ratio(
@@ -1002,148 +1311,36 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             train_pred_scaled.reshape(-1, 1)
         ).ravel()
 
-    context_df = df if args.inference_context == "all_observed" else train_df
-    test_slant_geom = test_df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
-    test_vert_base = build_vertical_target_geometry(
-        test_df, vertical_top_km=args.vertical_top_km
-    )[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
-    test_vert_geom = np.column_stack(
-        [test_vert_base, test_df[TIME_COLS].to_numpy(dtype=np.float64)]
+    final_outputs = predict_set_ratio_conversion(
+        model=model,
+        device=device,
+        y_scaler=y_scaler,
+        hard_identity_ratio=args.hard_identity_ratio,
+        target_mode=args.target_mode,
+        batch_size=args.batch_size,
+        slant_QG_scaled=slant_QG_scaled,
+        slant_OF_scaled=slant_OF_scaled,
+        slant_OM=slant_OM,
+        slant_OD=slant_OD,
+        slant_identity_delta=slant_identity_delta,
+        vert_QG_scaled=vert_QG_scaled,
+        vert_OF_scaled=vert_OF_scaled,
+        vert_OM=vert_OM,
+        vert_OD=vert_OD,
+        vertical_identity_delta=vertical_identity_delta,
+        slm_slant_ratio=slm_slant_ratio,
+        slm_vertical_ratio=slm_vertical_ratio,
+        shrinkage_strength=shrinkage_strength,
+        source_stec_eval=source_stec_eval,
     )
-
-    slant_OF, slant_OM, slant_OD, slant_context_stats = build_inference_context_sets(
-        test_df,
-        context_df,
-        target_geom=test_slant_geom,
-        obs_cols=obs_cols,
-        max_obs=args.max_obs,
-        context_radius_km=args.context_km,
-        same_epoch_context=args.same_epoch_pairs,
-    )
-    vert_OF, vert_OM, vert_OD, vert_context_stats = build_inference_context_sets(
-        test_df,
-        context_df,
-        target_geom=test_vert_geom,
-        obs_cols=obs_cols,
-        max_obs=args.max_obs,
-        context_radius_km=args.context_km,
-        same_epoch_context=args.same_epoch_pairs,
-    )
-
-    slant_QG_scaled = q_scaler.transform(q_imp.transform(test_slant_geom)).astype(np.float64)
-    vert_QG_scaled = q_scaler.transform(q_imp.transform(test_vert_geom)).astype(np.float64)
-    slant_OF_scaled = _scale_obs(slant_OF, slant_OM, o_imp, o_scaler)
-    vert_OF_scaled = _scale_obs(vert_OF, vert_OM, o_imp, o_scaler)
-    slant_identity_delta = compute_identity_delta(
-        test_slant_geom,
-        slant_OF,
-        slant_OM,
-        ipp_scale_km=args.identity_delta_ipp_scale_km,
-    )
-    vertical_identity_delta = compute_identity_delta(
-        test_vert_geom,
-        vert_OF,
-        vert_OM,
-        ipp_scale_km=args.identity_delta_ipp_scale_km,
-    )
-
-    if args.hard_identity_ratio:
-        slant_model_output = _predict_hard_identity_ratio(
-            model,
-            device,
-            slant_QG_scaled,
-            slant_OF_scaled,
-            slant_OM,
-            slant_OD,
-            slant_identity_delta,
-            batch_size=args.batch_size,
-        )
-        vertical_model_output = _predict_hard_identity_ratio(
-            model,
-            device,
-            vert_QG_scaled,
-            vert_OF_scaled,
-            vert_OM,
-            vert_OD,
-            vertical_identity_delta,
-            batch_size=args.batch_size,
-        )
-    else:
-        slant_model_output = y_scaler.inverse_transform(
-            _predict_set(
-                model,
-                device,
-                slant_QG_scaled,
-                slant_OF_scaled,
-                slant_OM,
-                slant_OD,
-                batch_size=args.batch_size,
-            ).reshape(-1, 1)
-        ).ravel()
-        vertical_model_output = y_scaler.inverse_transform(
-            _predict_set(
-                model,
-                device,
-                vert_QG_scaled,
-                vert_OF_scaled,
-                vert_OM,
-                vert_OD,
-                batch_size=args.batch_size,
-            ).reshape(-1, 1)
-        ).ravel()
-
-    slant_model_output = np.maximum(slant_model_output, 0.0)
-    vertical_model_output = np.maximum(vertical_model_output, 0.0)
-    mapping_i = QUERY_FEATURE_COLS.index("slant_factor")
-    source_mapping_eval = test_df[args.mapping_column].to_numpy(dtype=np.float64)
-    slant_target_mapping = test_slant_geom[:, mapping_i]
-    vertical_target_mapping = test_vert_geom[:, mapping_i]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        slm_slant_ratio = np.divide(
-            slant_target_mapping,
-            source_mapping_eval,
-            out=np.full(len(test_df), np.nan, dtype=np.float64),
-            where=source_mapping_eval > 0,
-        )
-        slm_vertical_ratio = np.divide(
-            vertical_target_mapping,
-            source_mapping_eval,
-            out=np.full(len(test_df), np.nan, dtype=np.float64),
-            where=source_mapping_eval > 0,
-        )
-    source_elevation_eval = test_df["elevation"].to_numpy(dtype=np.float64)
-    shrinkage_enabled = bool(args.elevation_shrinkage and args.target_mode == "slm_correction")
-    shrinkage_strength = elevation_shrinkage_strength(
-        source_elevation_eval,
-        enabled=shrinkage_enabled,
-        start_deg=args.shrinkage_start_deg,
-        end_deg=args.shrinkage_end_deg,
-        power=args.shrinkage_power,
-        min_strength=args.shrinkage_min_strength,
-    )
-    if args.target_mode == "source_ratio":
-        slant_ratio = slant_model_output
-        vertical_ratio = vertical_model_output
-        with np.errstate(divide="ignore", invalid="ignore"):
-            slant_correction_raw = np.divide(slant_ratio, slm_slant_ratio)
-            vertical_correction_raw = np.divide(vertical_ratio, slm_vertical_ratio)
-        slant_correction = slant_correction_raw
-        vertical_correction = vertical_correction_raw
-    else:
-        slant_correction_raw = slant_model_output
-        vertical_correction_raw = vertical_model_output
-        slant_correction = apply_correction_shrinkage(
-            slant_correction_raw, shrinkage_strength
-        )
-        vertical_correction = apply_correction_shrinkage(
-            vertical_correction_raw, shrinkage_strength
-        )
-        slant_ratio = slant_correction * slm_slant_ratio
-        vertical_ratio = vertical_correction * slm_vertical_ratio
-    slant_ratio = np.maximum(slant_ratio, 0.0)
-    vertical_ratio = np.maximum(vertical_ratio, 0.0)
-    source_stec_eval = test_df[args.source_stec_column].to_numpy(dtype=np.float64)
-
+    slant_model_output = final_outputs["slant_model_output"]
+    vertical_model_output = final_outputs["vertical_model_output"]
+    slant_correction_raw = final_outputs["slant_correction_raw"]
+    vertical_correction_raw = final_outputs["vertical_correction_raw"]
+    slant_correction = final_outputs["slant_correction"]
+    vertical_correction = final_outputs["vertical_correction"]
+    slant_ratio = final_outputs["slant_ratio"]
+    vertical_ratio = final_outputs["vertical_ratio"]
     predictions = test_df.copy()
     predictions["set_ratio_slant_identity_delta"] = slant_identity_delta
     predictions["set_ratio_vertical_identity_delta"] = vertical_identity_delta
@@ -1171,6 +1368,11 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     pred_path = save_table(
         predictions, table_dir / f"{run_name}_predictions.{args.output_format}"
     )
+    epoch_metrics_path = None
+    if epoch_metrics_rows:
+        epoch_metrics_path = table_dir / f"{run_name}_epoch_metrics.csv"
+        epoch_metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(epoch_metrics_rows).to_csv(epoch_metrics_path, index=False)
 
     vtec_meta = None
     if not args.skip_vtec_evaluation:
@@ -1239,6 +1441,9 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "shrinkage_power": float(args.shrinkage_power),
             "shrinkage_min_strength": float(args.shrinkage_min_strength),
             "epochs": int(args.epochs),
+            "epoch_metrics": epoch_metrics_enabled,
+            "epoch_metrics_every": int(args.epoch_metrics_every),
+            "epoch_metrics_epochs": sorted(epoch_metrics_epochs),
             "batch_size": int(args.batch_size),
             "learning_rate": float(args.learning_rate),
             "weight_decay": float(args.weight_decay),
@@ -1301,6 +1506,12 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         },
         "outputs": {"predictions": str(pred_path)},
     }
+    if epoch_metrics_path is not None:
+        metadata["outputs"]["epoch_metrics"] = str(epoch_metrics_path)
+        metadata["epoch_metrics"] = {
+            "n_rows": int(len(epoch_metrics_rows)),
+            "columns": list(pd.DataFrame(epoch_metrics_rows).columns),
+        }
     if vtec_meta is not None:
         metadata["outputs"]["vtec_metrics"] = vtec_meta["outputs"]
 
@@ -1364,6 +1575,28 @@ def parse_args(argv=None):
     p.add_argument("--train-end")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--epochs", type=int, default=50)
+    p.add_argument(
+        "--epoch-metrics",
+        action="store_true",
+        help=(
+            "After selected epochs, evaluate VTEC conversion metrics on the "
+            "configured test/evaluation rows and save an epoch_metrics CSV."
+        ),
+    )
+    p.add_argument(
+        "--epoch-metrics-every",
+        type=int,
+        default=1,
+        help="When --epoch-metrics is enabled, evaluate every N epochs.",
+    )
+    p.add_argument(
+        "--epoch-metrics-epochs",
+        default="",
+        help=(
+            "Comma-separated epochs to evaluate, e.g. 30,40,50,60. "
+            "Providing this also enables epoch metrics."
+        ),
+    )
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--learning-rate", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
