@@ -315,8 +315,134 @@ def build_pair_set_ratio_examples(
         "min_context_neighbors": int(np.min(n_context[valid])) if valid.any() else 0,
         "max_context_neighbors": int(np.max(n_context[valid])) if valid.any() else 0,
         "max_pair_examples": int(max_pair_examples) if max_pair_examples is not None else None,
+        "same_epoch_pairs": False,
+        "_identity_pair_mask": identity[valid],
     }
     return QG[valid], OF[valid], OM[valid], OD[valid], labels[valid], stats
+
+
+
+def build_pair_set_ratio_examples_same_epoch(
+    df: pd.DataFrame,
+    *,
+    source_stec_col: str,
+    target_stec_col: str,
+    obs_cols: list[str],
+    max_obs: int,
+    context_radius_km: float,
+    pair_radius_km: float,
+    max_target_neighbors: int,
+    include_identity: bool,
+    max_pair_examples: int | None,
+    seed: int,
+    mapping_col: str | None = None,
+    target_mode: str = "source_ratio",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Build set-ratio examples independently inside each timestamp."""
+
+    if "timestamp" not in df.columns:
+        raise KeyError("--same-epoch-pairs requires a timestamp column.")
+    groups = [
+        (pd.Timestamp(ts), group.copy())
+        for ts, group in df.groupby(pd.to_datetime(df["timestamp"]), sort=True)
+        if len(group) >= 2
+    ]
+    if not groups:
+        raise ValueError("No timestamp group contains at least two training rays.")
+
+    per_epoch_cap = None
+    if max_pair_examples is not None:
+        per_epoch_cap = max(1, int(np.ceil(int(max_pair_examples) / len(groups))))
+
+    QG_parts: list[np.ndarray] = []
+    OF_parts: list[np.ndarray] = []
+    OM_parts: list[np.ndarray] = []
+    OD_parts: list[np.ndarray] = []
+    Y_parts: list[np.ndarray] = []
+    identity_parts: list[np.ndarray] = []
+    epoch_stats: list[dict[str, Any]] = []
+    total_before_context = 0
+    total_after_context = 0
+
+    for idx, (timestamp, group) in enumerate(groups):
+        QG, OF, OM, OD, Y, stats = build_pair_set_ratio_examples(
+            group,
+            source_stec_col=source_stec_col,
+            target_stec_col=target_stec_col,
+            obs_cols=obs_cols,
+            max_obs=max_obs,
+            context_radius_km=context_radius_km,
+            pair_radius_km=pair_radius_km,
+            max_target_neighbors=max_target_neighbors,
+            include_identity=include_identity,
+            max_pair_examples=per_epoch_cap,
+            seed=seed + idx,
+            mapping_col=mapping_col,
+            target_mode=target_mode,
+        )
+        QG_parts.append(QG)
+        OF_parts.append(OF)
+        OM_parts.append(OM)
+        OD_parts.append(OD)
+        Y_parts.append(Y)
+        identity_parts.append(stats["_identity_pair_mask"])
+        total_before_context += int(stats["n_pairs_before_context_filter"])
+        total_after_context += int(stats["n_pairs_after_context_filter"])
+        epoch_stats.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "rows": int(len(group)),
+                "n_pairs_before_context_filter": int(
+                    stats["n_pairs_before_context_filter"]
+                ),
+                "n_pairs_after_context_filter": int(
+                    stats["n_pairs_after_context_filter"]
+                ),
+                "n_identity_pairs": int(stats["n_identity_pairs"]),
+                "mean_context_neighbors": float(stats["mean_context_neighbors"]),
+            }
+        )
+
+    QG = np.concatenate(QG_parts, axis=0)
+    OF = np.concatenate(OF_parts, axis=0)
+    OM = np.concatenate(OM_parts, axis=0)
+    OD = np.concatenate(OD_parts, axis=0)
+    Y = np.concatenate(Y_parts, axis=0)
+    identity = np.concatenate(identity_parts, axis=0)
+
+    if max_pair_examples is not None and len(Y) > int(max_pair_examples):
+        rng = np.random.default_rng(seed)
+        keep = rng.choice(len(Y), size=int(max_pair_examples), replace=False)
+        QG = QG[keep]
+        OF = OF[keep]
+        OM = OM[keep]
+        OD = OD[keep]
+        Y = Y[keep]
+        identity = identity[keep]
+
+    n_context = OM.sum(axis=1)
+    stats = {
+        "target_mode": target_mode,
+        "same_epoch_pairs": True,
+        "n_training_epochs": int(len(groups)),
+        "n_cross_epoch_pairs": 0,
+        "same_epoch_per_epoch_cap": per_epoch_cap,
+        "training_label_stats": _finite_stats(Y),
+        "raw_source_ratio_stats": None,
+        "slm_pair_ratio_stats": None,
+        "n_pairs_before_context_filter": total_before_context,
+        "n_pairs_after_context_filter": int(len(Y)),
+        "n_pairs_after_epoch_cap_pre_global_cap": total_after_context,
+        "n_identity_pairs": int(np.count_nonzero(identity)),
+        "identity_pair_fraction": float(np.count_nonzero(identity) / max(len(Y), 1)),
+        "mean_context_neighbors": float(np.mean(n_context)) if len(n_context) else 0.0,
+        "min_context_neighbors": int(np.min(n_context)) if len(n_context) else 0,
+        "max_context_neighbors": int(np.max(n_context)) if len(n_context) else 0,
+        "max_pair_examples": int(max_pair_examples) if max_pair_examples is not None else None,
+        "epoch_pair_stats": epoch_stats,
+        "_identity_pair_mask": identity,
+    }
+    return QG, OF, OM, OD, Y, stats
 
 
 def build_inference_context_sets(
@@ -327,8 +453,9 @@ def build_inference_context_sets(
     obs_cols: list[str],
     max_obs: int,
     context_radius_km: float,
+    same_epoch_context: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    """Build source-centered contexts for test rows."""
+    """Build source-centered contexts for evaluation rows."""
 
     n_query = len(query_df)
     n_obs_features = len(obs_cols) + 1
@@ -343,24 +470,52 @@ def build_inference_context_sets(
     context_index = context_df.index.to_numpy()
     context_base = context_df[obs_cols].to_numpy(dtype=np.float64)
 
+    query_ts = None
+    context_ts = None
+    if same_epoch_context:
+        if "timestamp" not in query_df.columns or "timestamp" not in context_df.columns:
+            raise KeyError("--same-epoch-pairs requires timestamp for inference context.")
+        query_ts = pd.to_datetime(query_df["timestamp"]).to_numpy()
+        context_ts = pd.to_datetime(context_df["timestamp"]).to_numpy()
+
     OF = np.zeros((n_query, max_obs, n_obs_features), dtype=np.float64)
     OM = np.zeros((n_query, max_obs), dtype=bool)
     OD = np.full((n_query, max_obs), np.inf, dtype=np.float64)
     n_context = np.zeros(n_query, dtype=int)
     has_anchor = np.zeros(n_query, dtype=bool)
+    missing_epoch_context = 0
 
     for i in range(n_query):
-        candidates, _ = _context_indices_for_source(
-            i,
-            source_ipp_lon=float(source_ipp_lon[i]),
-            source_ipp_lat=float(source_ipp_lat[i]),
-            context_ipp_lon=context_ipp_lon,
-            context_ipp_lat=context_ipp_lat,
-            context_index=context_index,
-            source_index_value=source_index[i],
-            radius_km=context_radius_km,
-            max_obs=max_obs,
-        )
+        if same_epoch_context:
+            assert query_ts is not None and context_ts is not None
+            epoch_locs = np.flatnonzero(context_ts == query_ts[i])
+            if len(epoch_locs) == 0:
+                missing_epoch_context += 1
+                continue
+            local_candidates, _ = _context_indices_for_source(
+                i,
+                source_ipp_lon=float(source_ipp_lon[i]),
+                source_ipp_lat=float(source_ipp_lat[i]),
+                context_ipp_lon=context_ipp_lon[epoch_locs],
+                context_ipp_lat=context_ipp_lat[epoch_locs],
+                context_index=context_index[epoch_locs],
+                source_index_value=source_index[i],
+                radius_km=context_radius_km,
+                max_obs=max_obs,
+            )
+            candidates = epoch_locs[local_candidates]
+        else:
+            candidates, _ = _context_indices_for_source(
+                i,
+                source_ipp_lon=float(source_ipp_lon[i]),
+                source_ipp_lat=float(source_ipp_lat[i]),
+                context_ipp_lon=context_ipp_lon,
+                context_ipp_lat=context_ipp_lat,
+                context_index=context_index,
+                source_index_value=source_index[i],
+                radius_km=context_radius_km,
+                max_obs=max_obs,
+            )
         n_context[i] = len(candidates)
         has_anchor[i] = np.any(context_index[candidates] == source_index[i])
         _fill_context_tensor(
@@ -380,6 +535,8 @@ def build_inference_context_sets(
 
     valid = OM.any(axis=1)
     stats = {
+        "same_epoch_context": bool(same_epoch_context),
+        "n_missing_epoch_context": int(missing_epoch_context),
         "mean_context_neighbors": float(np.mean(n_context[valid])) if valid.any() else 0.0,
         "min_context_neighbors": int(np.min(n_context[valid])) if valid.any() else 0,
         "max_context_neighbors": int(np.max(n_context[valid])) if valid.any() else 0,
@@ -707,7 +864,11 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         train_df, test_df, args
     )
     split_metadata["elevation_filter"] = elevation_filter_metadata
-    QG, OF, OM, OD, Y, pair_stats = build_pair_set_ratio_examples(
+    pair_builder = (
+        build_pair_set_ratio_examples_same_epoch
+        if args.same_epoch_pairs else build_pair_set_ratio_examples
+    )
+    QG, OF, OM, OD, Y, pair_stats = pair_builder(
         train_df,
         source_stec_col=args.source_stec_column,
         target_stec_col=args.slant_target_column,
@@ -857,6 +1018,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         obs_cols=obs_cols,
         max_obs=args.max_obs,
         context_radius_km=args.context_km,
+        same_epoch_context=args.same_epoch_pairs,
     )
     vert_OF, vert_OM, vert_OD, vert_context_stats = build_inference_context_sets(
         test_df,
@@ -865,6 +1027,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         obs_cols=obs_cols,
         max_obs=args.max_obs,
         context_radius_km=args.context_km,
+        same_epoch_context=args.same_epoch_pairs,
     )
 
     slant_QG_scaled = q_scaler.transform(q_imp.transform(test_slant_geom)).astype(np.float64)
@@ -1054,7 +1217,10 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         "vertical_top_km": float(args.vertical_top_km),
         "query_geom_columns": QUERY_FEATURE_COLS,
         "obs_feature_columns": model_obs_cols,
-        "pair_stats": pair_stats,
+        "pair_stats": {
+            key: value for key, value in pair_stats.items()
+            if not key.startswith("_")
+        },
         "slant_context_stats": slant_context_stats,
         "vertical_context_stats": vert_context_stats,
         "split": split_metadata,
@@ -1090,6 +1256,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "hard_identity_ratio": bool(args.hard_identity_ratio),
             "identity_delta_ipp_scale_km": float(args.identity_delta_ipp_scale_km),
             "inference_context": args.inference_context,
+            "same_epoch_pairs": bool(args.same_epoch_pairs),
             "min_train_elevation_deg": None
             if args.min_train_elevation_deg is None
             else float(args.min_train_elevation_deg),
@@ -1215,6 +1382,7 @@ def parse_args(argv=None):
     p.add_argument("--context-km", type=float, default=200.0)
     p.add_argument("--nearby-max-neighbors", type=int, default=30)
     p.add_argument("--max-pair-examples", type=int)
+    p.add_argument("--same-epoch-pairs", action="store_true", help="Build source-target training pairs and inference contexts only within each timestamp.")
     p.add_argument("--no-identity", action="store_true")
     p.add_argument("--hard-identity-ratio", action="store_true")
     p.add_argument("--identity-delta-ipp-scale-km", type=float, default=200.0)

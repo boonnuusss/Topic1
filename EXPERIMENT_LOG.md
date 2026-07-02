@@ -3064,3 +3064,319 @@ Report all-ray results separately from holdout results. For all-ray full-dataset
 conversion diagnostics, use `s30_e90_p4_min0` when requiring every high-elevation
 bin to be no worse than SLM. Keep `s30_e90_p4_min0.1` as the random-split balanced
 reference and `s30_e90_p2_min0` as the MAE-oriented alternative.
+
+## 2026-07-01 Experiment 042: Lightweight Multi-Time High-Elevation Training
+
+### Purpose
+
+The first full `UT04:00-06:00`, `30s`, `2M pair`, `100 epoch` multi-time plan was
+too slow for routine iteration. This experiment replans the multi-time route as a
+lightweight staged test and asks whether adding nearby epochs can beat the
+single-time UT05:00 high-elevation baseline on the same fixed UT05:00 holdout
+keys.
+
+### Code/Protocol Changes
+
+- `src.train_ray_mlp_simulation` and `src.train_set_ratio_mlp` now support
+  `--same-epoch-pairs` so source-target training pairs are generated only within
+  the same timestamp.
+- RayMLP nearby-pair training now supports `--max-pair-examples`.
+- Set-ratio inference context can be restricted to the same timestamp when
+  `--same-epoch-pairs` is enabled.
+- Metadata records same-epoch pairing, pair caps, identity-pair counts, and
+  confirms `n_cross_epoch_pairs = 0`.
+
+The scientific constraint is unchanged: `vtec_iri_ref` is not used for training;
+it is used only for VTEC-space evaluation.
+
+### Datasets
+
+Starting from the full 30s IRI simulation product:
+
+```text
+datasets/interim/iri_simulation_20240505_0400_0600_30s_spacing2p5_regular.parquet
+```
+
+three lighter training products were used:
+
+| Dataset | Window | Cadence | Rows | Epochs |
+| --- | --- | --- | ---: | ---: |
+| `iri_simulation_20240505_0400_0600_5min_spacing2p5_regular.parquet` | UT04:00-06:00 | 5 min | 51,702 | 25 |
+| `iri_simulation_20240505_0430_0530_2min_spacing2p5_regular.parquet` | UT04:30-05:30 | 2 min | 63,532 | 31 |
+| `iri_simulation_20240505_0445_0515_30s_spacing2p5_regular.parquet` | UT04:45-05:15 | 30 s | 124,217 | 61 |
+
+All formal comparisons use the same UT05:00 key-holdout rays from
+`results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`. For the
+high-elevation route, both train and evaluation source rays are filtered to
+`elevation >= 30 deg`, leaving `302` UT05:00 evaluation rays.
+
+### Results
+
+Summary output:
+
+```text
+results/tables/multitime_high30_slm_correction_comparison_20260701.csv
+```
+
+| Route | n | RMSE | MAE | Bias | R2 | SLM RMSE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| UT05-only high30 SLM-correction shrink p4 min0.1 | 302 | 0.8112 | 0.5865 | +0.1089 | 0.9957 | 0.9285 |
+| UT04-06 5min high30 SLM-correction shrink, 30ep, 100k pairs | 302 | 0.6180 | 0.4796 | +0.1702 | 0.9975 | 0.9285 |
+| UT04:30-05:30 2min high30 SLM-correction shrink, 50ep, 250k pairs | 302 | 0.7879 | 0.6138 | +0.4591 | 0.9960 | 0.9285 |
+| UT04:45-05:15 30s high30 SLM-correction shrink, 30ep, 100k pairs | 302 | 0.7284 | 0.5387 | +0.1825 | 0.9966 | 0.9285 |
+| UT04-06 5min anchor1 source-ratio, 30ep, 100k pairs | 419 | 2.8141 | 2.0203 | +1.8759 | 0.9481 | 2.4400 |
+| UT05-only anchor1 source-ratio | 419 | 1.5060 | 1.0912 | +0.0200 | 0.9851 | 2.4400 |
+
+### Interpretation
+
+The multi-time high-elevation SLM-correction route does improve over the
+single-time UT05:00 high-elevation model. The best lightweight run is the
+UT04:00-06:00 5min configuration, reducing RMSE from `0.8112` to `0.6180` TECU
+on the same UT05:00 high-elevation holdout rays.
+
+More dense sampling did not automatically improve the model. The 2min centered
+window and 30s centered window both beat the single-time high-elevation run, but
+neither beats the 5min result. This suggests the benefit is regularized temporal
+context rather than simply adding more pair examples or more epochs.
+
+The all-elevation anchor-only source-ratio route remains a poor multi-time
+direction: the 5min multi-time version degrades from the single-time `1.5060`
+RMSE to `2.8141` RMSE. It should not be scaled until the target or sampling
+strategy is redesigned.
+
+### Decision
+
+Promote lightweight multi-time `SLM-correction + elevation-dependent shrinkage`
+as the current best high-elevation route. Use the 5min UT04:00-06:00 result as
+the reference multi-time benchmark for now. Do not resume the full 30s/2M/100ep
+plan unless a smaller run first shows clear improvement over the 5min benchmark.
+
+## 2026-07-01 Experiment 043: Epoch Sweep For 5min Multi-Time High-Elevation Model
+
+### Purpose
+
+Experiment 042 found that the best lightweight multi-time setting was
+`UT04:00-06:00`, `5min`, `100k pairs`, `30 epochs` for the high-elevation
+`SLM-correction + elevation-dependent shrinkage` route. This sweep tests whether
+`30 epochs` is too small by varying only the training epoch count while keeping
+all other settings fixed.
+
+### Fixed Setup
+
+- Input: `datasets/interim/iri_simulation_20240505_0400_0600_5min_spacing2p5_regular.parquet`
+- Fixed UT05:00 key holdout: `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- Evaluation: `elevation >= 30 deg`, `302` UT05:00 rays
+- Pairing: same-epoch nearby pairs only, `nearby-km=200`, `nearby-max-neighbors=30`
+- Context: source anchor only, `context-km=0`, `max-obs=1`
+- Target: `slm_correction`
+- Regularization/shrinkage: `correction_regularization=0.001`, `s30_e90_p4_min0.1`
+- Pair cap: `100000`
+- `vtec_iri_ref` is evaluation-only and is not used for training.
+
+### Outputs
+
+```text
+results/tables/multitime_5min_high30_epoch_sweep_20260701.csv
+```
+
+### Results
+
+| Epochs | VTEC RMSE | MAE | Bias | R2 | Train-pair RMSE | Final train loss |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20 | 0.6786 | 0.5136 | +0.1983 | 0.9970 | 0.009319 | 0.228751 |
+| 30 | 0.6180 | 0.4796 | +0.1702 | 0.9975 | 0.007886 | 0.197295 |
+| 40 | 0.6619 | 0.5013 | +0.2423 | 0.9972 | 0.007844 | 0.178256 |
+| 50 | 0.6340 | 0.4958 | +0.2375 | 0.9974 | 0.007606 | 0.162830 |
+| 80 | 0.6711 | 0.5155 | +0.2660 | 0.9971 | 0.006806 | 0.135057 |
+
+For reference, the high-elevation SLM baseline on the same `302` UT05:00 rays is
+`0.9285` RMSE, and the single-time UT05-only high-elevation shrinkage run is
+`0.8112` RMSE.
+
+### Interpretation
+
+`30 epochs` is not under-trained for the current fixed setup. Increasing epochs
+continues to reduce the slant-pair training loss, but it does not improve the
+VTEC-space conversion RMSE. This indicates that better pair-level correction
+fitting does not monotonically translate into better vertical-query conversion.
+The likely cause is mild overfitting or target mismatch between same-epoch
+slant-pair correction and the source-to-vertical query used for STEC-to-VTEC
+conversion.
+
+### Decision
+
+Use `30 epochs` as the recommended setting for the current
+`UT04:00-06:00`, `5min`, `100k pairs`, high-elevation SLM-correction shrinkage
+configuration. Do not spend additional runtime on larger epoch counts unless the
+training target, sampling strategy, or model architecture changes.
+
+## 2026-07-02 Experiment 044: Local 30s Time Windows Around UT05:00
+
+### Purpose
+
+Experiment 042 showed that `UT04:00-06:00`, `5min`, `100k pairs`, `30 epochs`
+was the best lightweight multi-time high-elevation setup so far. A concern is
+that this benefit may come from broad temporal coverage rather than physically
+nearby ionospheric states. This experiment keeps the original `30s` time
+resolution and instead shortens the training time range around UT05:00 to test
+whether more temporally local training data improves the fixed UT05:00 VTEC
+conversion result.
+
+### Fixed Setup
+
+All runs use the same model and evaluation protocol as the current best
+high-elevation route:
+
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Pair cap: `100000`
+- Epochs: `30`
+- Train/eval elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` is evaluation-only and is not used for training.
+
+### Datasets
+
+The local-window datasets were cut from:
+
+```text
+datasets/interim/iri_simulation_20240505_0400_0600_30s_spacing2p5_regular.parquet
+```
+
+| Dataset | Window | Cadence | Rows | Epochs |
+| --- | --- | --- | ---: | ---: |
+| `iri_simulation_20240505_ut05_pm05min_30s_spacing2p5_regular.parquet` | UT04:55-05:05 | 30 s | 42,633 | 21 |
+| `iri_simulation_20240505_ut05_pm10min_30s_spacing2p5_regular.parquet` | UT04:50-05:10 | 30 s | 83,492 | 41 |
+| `iri_simulation_20240505_ut05_pm15min_30s_spacing2p5_regular.parquet` | UT04:45-05:15 | 30 s | 124,217 | 61 |
+| `iri_simulation_20240505_ut05_pm20min_30s_spacing2p5_regular.parquet` | UT04:40-05:20 | 30 s | 164,941 | 81 |
+| `iri_simulation_20240505_ut05_pm30min_30s_spacing2p5_regular.parquet` | UT04:30-05:30 | 30 s | 247,338 | 121 |
+
+### Outputs
+
+```text
+results/tables/local_30s_window_vs_5min_multitime_comparison_20260702.csv
+```
+
+### Results
+
+| Route | n | RMSE | MAE | Bias | R2 | Train rows | Train pairs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| UT05-only high30 shrink | 302 | 0.8112 | 0.5865 | +0.1089 | 0.9957 | 1,163 | 18,978 |
+| UT04-06 5min high30 shrink | 302 | 0.6180 | 0.4796 | +0.1702 | 0.9975 | 36,186 | 100,000 |
+| UT05 +/-5min 30s high30 shrink | 302 | 0.8134 | 0.5691 | +0.1890 | 0.9957 | 30,328 | 100,000 |
+| UT05 +/-10min 30s high30 shrink | 302 | 0.6844 | 0.5270 | +0.1264 | 0.9970 | 59,682 | 100,000 |
+| UT05 +/-15min 30s high30 shrink | 302 | 0.7284 | 0.5387 | +0.1825 | 0.9966 | 88,857 | 100,000 |
+| UT05 +/-20min 30s high30 shrink | 302 | 0.6854 | 0.5171 | +0.2252 | 0.9969 | 117,878 | 100,000 |
+| UT05 +/-30min 30s high30 shrink | 302 | 0.6974 | 0.5176 | +0.1559 | 0.9968 | 176,180 | 100,000 |
+
+For reference, the high-elevation SLM baseline on the same UT05:00 holdout rays
+is `0.9285` RMSE.
+
+### Interpretation
+
+The local 30s window idea is physically well motivated: nearby epochs should be
+less affected by ionospheric temporal evolution. In this current pair-learning
+setup, however, the best local 30s window is `+/-10min` with `0.6844` RMSE,
+which improves over the UT05-only model but does not beat the broader
+`UT04:00-06:00` 5min downsampled run (`0.6180` RMSE).
+
+This suggests that the current model benefits from geometric and sampling
+diversity across the two-hour window more than it suffers from the additional
+slow temporal variability introduced by sparse 5min sampling. The narrow
+`+/-5min` window is almost identical to the UT05-only result, likely because it
+adds many nearby-in-time rays but not enough independent geometric diversity for
+source-to-vertical correction learning.
+
+### Decision
+
+Keep `UT04:00-06:00`, `5min`, `100k pairs`, `30 epochs` as the current reference
+multi-time setting. The best local 30s window (`+/-10min`) should be kept as a
+secondary diagnostic, especially if future models explicitly encode temporal
+smoothness or use time-weighted sampling. Do not replace the 5min reference with
+a local 30s window under the current set-ratio anchor-only architecture.
+
+## 2026-07-02 Experiment 045: Epoch Sweep For Local 30s Time Windows
+
+### Purpose
+
+Experiment 044 compared local `30s` time windows around UT05:00 using a fixed
+`30 epoch` setting. Because local windows may need more epochs than the broader
+5min downsampled setup, this experiment extends each time-window run to
+`40`, `50`, and `60` epochs, then compares them against the existing `30 epoch`
+results.
+
+### Fixed Setup
+
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Pair cap: `100000`
+- Train/eval elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` is evaluation-only and is not used for training.
+
+This experiment also reran the UT05-only single-epoch baseline at
+`30/40/50/60` epochs, because the previously reported UT05-only high-elevation
+number came from the earlier `100 epoch` run.
+
+### Outputs
+
+```text
+results/tables/local_30s_window_epoch_sweep_20260702.csv
+results/tables/local_30s_window_epoch_sweep_best_by_window_20260702.csv
+```
+
+### RMSE Sweep
+
+| Route | 30ep | 40ep | 50ep | 60ep | Best epoch | Best RMSE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| UT05-only high30 shrink | 0.8753 | 0.8183 | 0.8106 | 0.8123 | 50 | 0.8106 |
+| UT04-06 5min high30 shrink | 0.6180 | 0.6619 | 0.6340 | 0.6439 | 30 | 0.6180 |
+| UT05 +/-5min 30s high30 shrink | 0.8134 | 0.7635 | 0.7758 | 0.6938 | 60 | 0.6938 |
+| UT05 +/-10min 30s high30 shrink | 0.6844 | 0.6924 | 0.6819 | 0.6953 | 50 | 0.6819 |
+| UT05 +/-15min 30s high30 shrink | 0.7284 | 0.7343 | 0.7108 | 0.6694 | 60 | 0.6694 |
+| UT05 +/-20min 30s high30 shrink | 0.6854 | 0.7321 | 0.7218 | 0.7480 | 30 | 0.6854 |
+| UT05 +/-30min 30s high30 shrink | 0.6974 | 0.7037 | 0.7201 | 0.6812 | 60 | 0.6812 |
+
+### Best-By-Window Metrics
+
+| Route | Best epoch | RMSE | MAE | Bias | R2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| UT05-only high30 shrink | 50 | 0.8106 | 0.5920 | +0.1140 | 0.9957 |
+| UT04-06 5min high30 shrink | 30 | 0.6180 | 0.4796 | +0.1702 | 0.9975 |
+| UT05 +/-5min 30s high30 shrink | 60 | 0.6938 | 0.5331 | +0.1777 | 0.9969 |
+| UT05 +/-10min 30s high30 shrink | 50 | 0.6819 | 0.5211 | +0.2168 | 0.9970 |
+| UT05 +/-15min 30s high30 shrink | 60 | 0.6694 | 0.5153 | +0.2300 | 0.9971 |
+| UT05 +/-20min 30s high30 shrink | 30 | 0.6854 | 0.5171 | +0.2252 | 0.9969 |
+| UT05 +/-30min 30s high30 shrink | 60 | 0.6812 | 0.5232 | +0.2980 | 0.9970 |
+
+For reference, the SLM baseline on the same high-elevation UT05:00 holdout rays
+is `0.9285` RMSE.
+
+### Interpretation
+
+The user's concern was valid: several local `30s` windows were under-trained at
+`30 epochs`. Increasing epochs substantially improves the `+/-5min` window
+(`0.8134 -> 0.6938`) and the `+/-15min` window (`0.7284 -> 0.6694`). However,
+after epoch tuning, no local `30s` window beats the broader `UT04:00-06:00`,
+`5min`, `30 epoch` reference (`0.6180`).
+
+The best local `30s` result is `+/-15min`, `60 epochs`, with `0.6694` RMSE. It is
+better than the UT05-only tuned baseline (`0.8106`) and better than SLM
+(`0.9285`), but still worse than the 5min two-hour downsampled run.
+
+Longer training also tends to increase positive VTEC bias in several local
+windows. This reinforces the earlier finding that lower slant-pair training loss
+does not guarantee better source-to-vertical VTEC conversion.
+
+### Decision
+
+Keep `UT04:00-06:00`, `5min`, `100k pairs`, `30 epochs` as the current best
+multi-time high-elevation reference. Keep `UT05 +/-15min`, `30s`, `60 epochs` as
+the best local-window diagnostic. If local-window training is revisited, the next
+step should change the sampling or objective, not simply increase epochs further.

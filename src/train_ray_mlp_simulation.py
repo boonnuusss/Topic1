@@ -176,20 +176,11 @@ def build_nearby_pairs(
     max_ipp_distance_km: float = 200.0,
     max_neighbors: int = 20,
     include_identity: bool = True,
+    max_pair_examples: int | None = None,
+    seed: int = 42,
 ) -> tuple[np.ndarray, np.ndarray, list[str], dict[str, Any]]:
-    """Build training pairs from rays whose IPPs lie within *max_ipp_distance_km*.
+    """Build training pairs from rays whose IPPs lie within *max_ipp_distance_km*."""
 
-    Ionospheric electron density has a spatial correlation length of roughly
-    200–500 km.  Pairs with IPPs farther apart are essentially uncorrelated
-    and would contribute noise rather than signal.  This keeps pair count at
-    *O(N × avg_neighbors)* instead of *O(N²)*.
-
-    Returns
-    -------
-    X : np.ndarray, shape (approx N × k, 45), dtype float64
-    y : np.ndarray, shape (approx N × k,), dtype float64
-    feature_cols : list[str]
-    """
     n = len(df)
     if n < 2:
         raise ValueError("Nearby-pairs training requires at least 2 rays.")
@@ -249,10 +240,14 @@ def build_nearby_pairs(
         + ["source_stec"]
     )
 
+    n_pairs_before_finite = int(len(src_idx))
     valid = np.isfinite(X).all(axis=1) & np.isfinite(y)
-    identity_mask = (src_idx == tgt_idx)[valid]
-    source_valid = source_stec_vals[src_idx][valid]
-    target_valid = target_stec_vals[tgt_idx][valid]
+    X = X[valid]
+    y = y[valid]
+    src_idx = src_idx[valid]
+    tgt_idx = tgt_idx[valid]
+    source_valid = source_stec_vals[src_idx]
+    target_valid = target_stec_vals[tgt_idx]
     with np.errstate(divide="ignore", invalid="ignore"):
         raw_ratio = np.divide(
             target_valid,
@@ -260,13 +255,29 @@ def build_nearby_pairs(
             out=np.full(len(target_valid), np.nan, dtype=float),
             where=np.abs(source_valid) > 1e-12,
         )
+    n_pairs_after_finite = int(len(y))
+    if max_pair_examples is not None and len(y) > int(max_pair_examples):
+        rng = np.random.default_rng(seed)
+        keep = rng.choice(len(y), size=int(max_pair_examples), replace=False)
+        X = X[keep]
+        y = y[keep]
+        src_idx = src_idx[keep]
+        tgt_idx = tgt_idx[keep]
+        raw_ratio = raw_ratio[keep]
+
+    identity_mask = src_idx == tgt_idx
 
     pair_metadata: dict[str, Any] = {
+        "same_epoch_pairs": False,
         "nearby_include_identity": bool(include_identity),
         "nearby_max_distance_km": float(max_ipp_distance_km),
         "nearby_max_neighbors": int(max_neighbors),
-        "n_pairs_before_finite_filter": int(len(src_idx)),
-        "n_pairs_after_finite_filter": int(np.count_nonzero(valid)),
+        "n_pairs_before_finite_filter": n_pairs_before_finite,
+        "n_pairs_after_finite_filter": n_pairs_after_finite,
+        "n_pairs_after_cap": int(len(y)),
+        "max_pair_examples": (
+            int(max_pair_examples) if max_pair_examples is not None else None
+        ),
         "_identity_pair_mask": identity_mask,
     }
     _update_identity_pair_stats(
@@ -275,7 +286,108 @@ def build_nearby_pairs(
         values_for_stats=raw_ratio,
         stat_key="identity_target_source_ratio_raw_stats",
     )
-    return X[valid], y[valid], feature_cols, pair_metadata
+    return X, y, feature_cols, pair_metadata
+
+
+def build_nearby_pairs_same_epoch(
+    df: pd.DataFrame,
+    *,
+    source_stec_column: str,
+    slant_target_column: str,
+    max_ipp_distance_km: float,
+    max_neighbors: int,
+    include_identity: bool,
+    max_pair_examples: int | None,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, list[str], dict[str, Any]]:
+    """Build nearby pairs independently inside each timestamp."""
+
+    if "timestamp" not in df.columns:
+        raise KeyError("--same-epoch-pairs requires a timestamp column.")
+    groups = [
+        (pd.Timestamp(ts), group.copy())
+        for ts, group in df.groupby(pd.to_datetime(df["timestamp"]), sort=True)
+        if len(group) >= 2
+    ]
+    if not groups:
+        raise ValueError("No timestamp group contains at least two training rays.")
+
+    per_epoch_cap = None
+    if max_pair_examples is not None:
+        per_epoch_cap = max(1, int(np.ceil(int(max_pair_examples) / len(groups))))
+
+    X_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+    identity_parts: list[np.ndarray] = []
+    feature_cols: list[str] | None = None
+    epoch_stats: list[dict[str, Any]] = []
+    total_before_finite = 0
+    total_after_finite = 0
+
+    for idx, (timestamp, group) in enumerate(groups):
+        X_epoch, y_epoch, cols, meta = build_nearby_pairs(
+            group,
+            source_stec_column=source_stec_column,
+            slant_target_column=slant_target_column,
+            max_ipp_distance_km=max_ipp_distance_km,
+            max_neighbors=max_neighbors,
+            include_identity=include_identity,
+            max_pair_examples=per_epoch_cap,
+            seed=seed + idx,
+        )
+        feature_cols = cols
+        X_parts.append(X_epoch)
+        y_parts.append(y_epoch)
+        identity_parts.append(meta["_identity_pair_mask"])
+        total_before_finite += int(meta["n_pairs_before_finite_filter"])
+        total_after_finite += int(meta["n_pairs_after_finite_filter"])
+        epoch_stats.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "rows": int(len(group)),
+                "n_pairs_after_finite_filter": int(
+                    meta["n_pairs_after_finite_filter"]
+                ),
+                "n_pairs_after_cap": int(meta["n_pairs_after_cap"]),
+                "n_identity_pairs": int(meta["n_identity_pairs"]),
+            }
+        )
+
+    if feature_cols is None:
+        raise ValueError("No same-epoch nearby training pairs were created.")
+
+    X = np.concatenate(X_parts, axis=0)
+    y = np.concatenate(y_parts, axis=0)
+    identity_mask = np.concatenate(identity_parts, axis=0)
+    if max_pair_examples is not None and len(y) > int(max_pair_examples):
+        rng = np.random.default_rng(seed)
+        keep = rng.choice(len(y), size=int(max_pair_examples), replace=False)
+        X = X[keep]
+        y = y[keep]
+        identity_mask = identity_mask[keep]
+
+    pair_metadata: dict[str, Any] = {
+        "same_epoch_pairs": True,
+        "n_training_epochs": int(len(groups)),
+        "n_cross_epoch_pairs": 0,
+        "nearby_include_identity": bool(include_identity),
+        "nearby_max_distance_km": float(max_ipp_distance_km),
+        "nearby_max_neighbors": int(max_neighbors),
+        "same_epoch_per_epoch_cap": per_epoch_cap,
+        "max_pair_examples": (
+            int(max_pair_examples) if max_pair_examples is not None else None
+        ),
+        "n_pairs_before_finite_filter": total_before_finite,
+        "n_pairs_after_finite_filter": total_after_finite,
+        "n_pairs_after_cap": int(len(y)),
+        "n_identity_pairs": int(np.count_nonzero(identity_mask)),
+        "identity_pair_fraction": float(
+            np.count_nonzero(identity_mask) / max(len(identity_mask), 1)
+        ),
+        "epoch_pair_stats": epoch_stats,
+        "_identity_pair_mask": identity_mask,
+    }
+    return X, y, feature_cols, pair_metadata
 
 
 def build_all_to_all_pairs(
@@ -525,6 +637,21 @@ def choose_simulation_split(
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Choose the train/test split for simulation RayMLP experiments."""
 
+    if args.split == "all":
+        if args.test_keys_from or args.test_timestamp:
+            raise ValueError("--split all cannot be combined with test holdout options.")
+        full_df = df.copy()
+        return full_df, full_df.copy(), {
+            "type": "all",
+            "n_train": int(len(full_df)),
+            "n_test": int(len(full_df)),
+            "train_test_overlap": True,
+            "interpretation": (
+                "Diagnostic full-data fit/evaluation. VTEC truth remains "
+                "evaluation-only and is not used as a training label."
+            ),
+        }
+
     if args.test_keys_from and args.test_timestamp:
         raise ValueError("--test-keys-from and --test-timestamp are mutually exclusive.")
 
@@ -634,6 +761,8 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
     pair_metadata: dict[str, Any] = {}
 
     if args.all_pairs:
+        if args.same_epoch_pairs:
+            raise ValueError("--same-epoch-pairs is supported for nearby pairs, not --all-pairs.")
         X_train, y_train, feature_cols = build_all_to_all_pairs(
             train_df,
             source_stec_column=args.source_stec_column,
@@ -642,14 +771,28 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
         )
         pair_kind = "all_to_all"
     elif args.nearby_km > 0:
-        X_train, y_train, feature_cols, pair_metadata = build_nearby_pairs(
-            train_df,
-            source_stec_column=args.source_stec_column,
-            slant_target_column=args.slant_target_column,
-            max_ipp_distance_km=args.nearby_km,
-            max_neighbors=args.nearby_max_neighbors,
-            include_identity=not args.nearby_no_identity,
-        )
+        if args.same_epoch_pairs:
+            X_train, y_train, feature_cols, pair_metadata = build_nearby_pairs_same_epoch(
+                train_df,
+                source_stec_column=args.source_stec_column,
+                slant_target_column=args.slant_target_column,
+                max_ipp_distance_km=args.nearby_km,
+                max_neighbors=args.nearby_max_neighbors,
+                include_identity=not args.nearby_no_identity,
+                max_pair_examples=args.max_pair_examples,
+                seed=args.seed,
+            )
+        else:
+            X_train, y_train, feature_cols, pair_metadata = build_nearby_pairs(
+                train_df,
+                source_stec_column=args.source_stec_column,
+                slant_target_column=args.slant_target_column,
+                max_ipp_distance_km=args.nearby_km,
+                max_neighbors=args.nearby_max_neighbors,
+                include_identity=not args.nearby_no_identity,
+                max_pair_examples=args.max_pair_examples,
+                seed=args.seed,
+            )
         pair_kind = "ipp_nearby"
     else:
         train_pairs = build_training_pairs(
@@ -938,6 +1081,9 @@ def train_ray_mlp_simulation(args: argparse.Namespace) -> dict[str, Any]:
             "nearby_include_identity": bool(not args.nearby_no_identity)
             if args.nearby_km > 0 else None,
             "target_mode": args.target_mode,
+            "same_epoch_pairs": bool(args.same_epoch_pairs),
+            "max_pair_examples": int(args.max_pair_examples)
+            if args.max_pair_examples is not None else None,
         },
         "history": history,
         "metrics": {
@@ -1043,7 +1189,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vertical-top-km", type=float, default=2000.0)
     parser.add_argument(
         "--split",
-        choices=["random", "time", "station", "prn"],
+        choices=["random", "time", "station", "prn", "all"],
         default="random",
     )
     parser.add_argument(
@@ -1101,6 +1247,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Exclude identity (i→i) pairs from nearby-pair training.",
     )
+    parser.add_argument("--same-epoch-pairs", action="store_true", help="Build source-target training pairs only within each timestamp.")
+    parser.add_argument("--max-pair-examples", type=int, help="Random cap for numpy-built pair examples after finite filtering.")
     parser.add_argument(
         "--all-pairs",
         action="store_true",
