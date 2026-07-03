@@ -3647,3 +3647,235 @@ the desired checkpoints, for example:
 
 This produces a directly comparable epoch curve without retraining from scratch
 for every epoch setting.
+
+## 2026-07-02 Experiment 049: Full-Day 5min Density-Matched 150 Epoch Curve
+
+### Purpose
+
+Use the epoch-level diagnostics added in Experiment 048 to avoid rerunning the
+same density-matched experiment for many separate epoch settings. This run trains
+once to `150 epochs` and evaluates VTEC conversion at selected checkpoints from
+`50` to `150` epochs.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Pair cap: `1,152,000`
+- Train/eval elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- Evaluation checkpoints:
+  `50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Command
+
+```powershell
+.\.venv\Scripts\python.exe -m src.train_set_ratio_mlp `
+  --input datasets\interim\iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet `
+  --run-name set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e150_p1152k_epochcurve `
+  --test-keys-from results\tables\set_ratio_mlp_0500_anchor1_e100_predictions.parquet `
+  --test-key-columns timestamp,station,prn `
+  --seed 42 `
+  --nearby-km 200 --context-km 0 --nearby-max-neighbors 30 --max-obs 1 `
+  --target-mode slm_correction --correction-regularization 0.001 `
+  --elevation-shrinkage --shrinkage-start-deg 30 --shrinkage-end-deg 90 `
+  --shrinkage-power 4 --shrinkage-min-strength 0.1 `
+  --min-train-elevation-deg 30 --min-eval-elevation-deg 30 `
+  --same-epoch-pairs --max-pair-examples 1152000 `
+  --epochs 150 `
+  --epoch-metrics-epochs 50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150 `
+  --batch-size 1024 --device cpu --output-format parquet
+```
+
+### Outputs
+
+```text
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e150_p1152k_epochcurve_epoch_metrics.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e150_p1152k_epochcurve_predictions.parquet
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e150_p1152k_epochcurve_metrics.json
+results/checkpoints/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e150_p1152k_epochcurve.pth
+```
+
+### Results
+
+| Epoch | Train loss | RMSE | MAE | Bias | R2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 0.1462 | 0.6039 | 0.4827 | +0.2186 | 0.9976 |
+| 55 | 0.1419 | 0.6464 | 0.5013 | +0.2254 | 0.9973 |
+| 60 | 0.1375 | 0.6517 | 0.5098 | +0.2205 | 0.9972 |
+| 65 | 0.1347 | 0.6210 | 0.4868 | +0.2124 | 0.9975 |
+| 70 | 0.1314 | 0.6056 | 0.4824 | +0.1859 | 0.9976 |
+| 75 | 0.1303 | 0.6170 | 0.4856 | +0.1824 | 0.9975 |
+| 80 | 0.1278 | 0.6295 | 0.4955 | +0.2135 | 0.9974 |
+| 85 | 0.1256 | 0.6191 | 0.4871 | +0.1776 | 0.9975 |
+| 90 | 0.1233 | 0.6582 | 0.5101 | +0.2374 | 0.9972 |
+| 95 | 0.1209 | 0.6538 | 0.5089 | +0.2241 | 0.9972 |
+| 100 | 0.1198 | 0.6310 | 0.4978 | +0.1993 | 0.9974 |
+| 105 | 0.1180 | 0.6397 | 0.5007 | +0.2090 | 0.9973 |
+| 110 | 0.1152 | 0.6583 | 0.5133 | +0.2407 | 0.9972 |
+| 115 | 0.1138 | 0.6515 | 0.5140 | +0.1974 | 0.9972 |
+| 120 | 0.1121 | 0.6619 | 0.5217 | +0.2447 | 0.9972 |
+| 125 | 0.1111 | 0.6409 | 0.5084 | +0.2057 | 0.9973 |
+| 130 | 0.1104 | 0.6577 | 0.5172 | +0.2465 | 0.9972 |
+| 135 | 0.1090 | 0.6608 | 0.5158 | +0.2315 | 0.9972 |
+| 140 | 0.1071 | 0.6647 | 0.5211 | +0.2378 | 0.9971 |
+| 145 | 0.1059 | 0.6501 | 0.5129 | +0.2463 | 0.9973 |
+| 150 | 0.1050 | 0.6519 | 0.5159 | +0.2484 | 0.9972 |
+
+### Interpretation
+
+The best checkpoint in this single-run epoch curve is `50 epochs`, with RMSE
+`0.6039` TECU. This is slightly better than the previous `70 epoch` result
+(`0.6056`) and the cheaper `100k pairs, 60 epoch` reference (`0.6060`), but the
+margin is tiny.
+
+The train loss decreases monotonically from `0.1462` at 50 epochs to `0.1050` at
+150 epochs, while VTEC RMSE does not improve. This reinforces the earlier finding
+that optimizing the dense slant-pair correction objective for longer does not
+monotonically improve the vertical-query STEC-to-VTEC conversion objective.
+
+### Decision
+
+For the density-matched full-day setting, use `50 epochs` as the current best
+checkpoint (`RMSE = 0.6039`). For practical iteration, the cheaper `100k pairs,
+60 epoch` run remains nearly equivalent and much faster. Future tuning should
+focus on pair sampling/objective design rather than simply increasing epochs.
+
+## 2026-07-03 Experiment 050: Full-Day 5min Density-Matched Low-Epoch Curve
+
+### Purpose
+
+Experiment 049 showed that the `50 epoch` checkpoint was slightly better than
+later checkpoints up to `150 epochs`. This suggests the optimum may occur before
+50 epochs. This experiment reruns the same density-matched full-day setup to
+`50 epochs` and records VTEC diagnostics every 5 epochs from `5` to `50`.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Pair cap: `1,152,000`
+- Train/eval elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- Evaluation checkpoints: `5,10,15,20,25,30,35,40,45,50`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Outputs
+
+```text
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e50_p1152k_lowepoch_curve_epoch_metrics.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e50_p1152k_lowepoch_curve_predictions.parquet
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e50_p1152k_lowepoch_curve_metrics.json
+results/checkpoints/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e50_p1152k_lowepoch_curve.pth
+```
+
+### Results
+
+| Epoch | Train loss | RMSE | MAE | Bias | R2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 0.2779 | 0.7133 | 0.5543 | +0.2994 | 0.9967 |
+| 10 | 0.2256 | 0.6422 | 0.5020 | +0.1848 | 0.9973 |
+| 15 | 0.2039 | 0.6243 | 0.4885 | +0.2651 | 0.9975 |
+| 20 | 0.1903 | 0.6510 | 0.5112 | +0.2341 | 0.9972 |
+| 25 | 0.1792 | 0.6304 | 0.4916 | +0.2143 | 0.9974 |
+| 30 | 0.1697 | 0.5975 | 0.4758 | +0.1867 | 0.9977 |
+| 35 | 0.1614 | 0.6677 | 0.5167 | +0.1805 | 0.9971 |
+| 40 | 0.1546 | 0.6418 | 0.4977 | +0.2207 | 0.9973 |
+| 45 | 0.1503 | 0.6163 | 0.4913 | +0.2187 | 0.9975 |
+| 50 | 0.1462 | 0.6039 | 0.4827 | +0.2186 | 0.9976 |
+
+### Interpretation
+
+The best checkpoint in this low-epoch curve is `30 epochs`, with RMSE `0.5975`
+TECU. This improves on the previous best density-matched checkpoint from
+Experiment 049 (`50 epochs`, RMSE `0.6039`) and the earlier practical reference
+(`100k pairs`, `60 epochs`, RMSE `0.6060`).
+
+The curve is not monotonic. Training loss decreases steadily, but VTEC RMSE has a
+clear local minimum near 30 epochs and worsens at 35-40 epochs before partially
+recovering at 45-50 epochs. This reinforces that the slant-pair training loss is
+not a reliable proxy for the vertical-query VTEC conversion objective.
+
+### Decision
+
+For the full-day 5min density-matched setting, the current observed best
+checkpoint is `30 epochs` (`RMSE = 0.5975`). The best region should now be refined
+around `25-35 epochs` with finer checkpoints, rather than extending training to
+higher epochs.
+
+## 2026-07-03 Experiment 051: Full-Day 5min Density-Matched Fine Epoch Sweep 25-35
+
+### Purpose
+
+Experiment 050 found that `30 epochs` was better than `50 epochs` for the
+full-day `5min`, density-matched `1.152M pairs` setting. This experiment performs
+a finer sweep from `25` to `35` epochs to check whether the optimum is exactly
+near 30 epochs or slightly shifted.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Pair cap: `1,152,000`
+- Train/eval elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- Evaluation checkpoints: `25,26,27,28,29,30,31,32,33,34,35`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Outputs
+
+```text
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e35_p1152k_epoch25_35_curve_epoch_metrics.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e35_p1152k_epoch25_35_curve_predictions.parquet
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e35_p1152k_epoch25_35_curve_metrics.json
+results/checkpoints/set_ratio_mlp_0000_2400_5min_ut05keys_high30_slm_corr_shrink_e35_p1152k_epoch25_35_curve.pth
+```
+
+### Results
+
+| Epoch | Train loss | RMSE | MAE | Bias | R2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.1792 | 0.6304 | 0.4916 | +0.2143 | 0.9974 |
+| 26 | 0.1770 | 0.6512 | 0.5010 | +0.2140 | 0.9972 |
+| 27 | 0.1743 | 0.6643 | 0.5096 | +0.2607 | 0.9971 |
+| 28 | 0.1732 | 0.6516 | 0.5069 | +0.2178 | 0.9972 |
+| 29 | 0.1714 | 0.6265 | 0.4928 | +0.2043 | 0.9974 |
+| 30 | 0.1697 | 0.5975 | 0.4758 | +0.1867 | 0.9977 |
+| 31 | 0.1677 | 0.6330 | 0.5020 | +0.2360 | 0.9974 |
+| 32 | 0.1653 | 0.6487 | 0.5044 | +0.2311 | 0.9973 |
+| 33 | 0.1641 | 0.5971 | 0.4711 | +0.2042 | 0.9977 |
+| 34 | 0.1635 | 0.6100 | 0.4818 | +0.2223 | 0.9976 |
+| 35 | 0.1614 | 0.6677 | 0.5167 | +0.1805 | 0.9971 |
+
+### Interpretation
+
+The lowest RMSE in this fine sweep is at `33 epochs` (`0.5971` TECU), slightly
+below the previous `30 epoch` result (`0.5975` TECU). The difference is only
+`0.0004` TECU, so `30` and `33` epochs should be interpreted as the same
+high-performance plateau rather than a sharply determined optimum. The `33 epoch`
+checkpoint also has the best MAE in this sweep (`0.4711` TECU), while its bias is
+slightly larger than at `30 epochs`.
+
+The curve remains irregular: `31-32` and `35` epochs are clearly worse despite
+lower training loss. This reinforces that epoch selection should be based on the
+VTEC-space checkpoint metric, not the slant-pair training loss.
+
+### Decision
+
+For the current full-day `5min`, density-matched setup, use `33 epochs` as the
+observed best checkpoint (`RMSE = 0.5971`, `MAE = 0.4711`). In interpretation,
+report the stable best region as approximately `30-33 epochs`, because the RMSE
+difference between `30` and `33` epochs is negligible.
