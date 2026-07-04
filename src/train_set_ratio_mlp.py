@@ -147,7 +147,23 @@ def _fill_context_tensor(
         context_ipp_lat[candidates],
     )
 
+def transform_training_labels(
+    labels: np.ndarray,
+    *,
+    target_mode: str,
+    target_transform: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return transformed training labels and their finite-valid mask."""
 
+    if target_transform == "linear":
+        return labels, np.isfinite(labels)
+    if target_transform == "log":
+        if target_mode != "slm_correction":
+            raise ValueError("--target-transform log requires --target-mode slm_correction.")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            transformed = np.log(labels)
+        return transformed, np.isfinite(transformed) & (labels > 0)
+    raise ValueError(f"Unsupported target transform: {target_transform}")
 def build_pair_set_ratio_examples(
     df: pd.DataFrame,
     *,
@@ -161,8 +177,11 @@ def build_pair_set_ratio_examples(
     include_identity: bool,
     max_pair_examples: int | None,
     seed: int,
+    min_target_elevation_deg: float | None = None,
+    target_elevation_keep_identity: bool = False,
     mapping_col: str | None = None,
     target_mode: str = "source_ratio",
+    target_transform: str = "linear",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Build source-context/target-query examples with ratio-like labels."""
 
@@ -177,6 +196,14 @@ def build_pair_set_ratio_examples(
     context_base = df[obs_cols].to_numpy(dtype=np.float64)
     source_stec = df[source_stec_col].to_numpy(dtype=np.float64)
     target_stec = df[target_stec_col].to_numpy(dtype=np.float64)
+    target_elevation = df["elevation"].to_numpy(dtype=np.float64)
+    target_elevation_threshold = (
+        None if min_target_elevation_deg is None
+        else float(min_target_elevation_deg)
+    )
+    target_elevation_mask = np.ones(n, dtype=bool)
+    if target_elevation_threshold is not None:
+        target_elevation_mask = target_elevation >= target_elevation_threshold
     mapping = None
     if target_mode == "slm_correction":
         if mapping_col is None:
@@ -192,8 +219,15 @@ def build_pair_set_ratio_examples(
     for i in range(n):
         dists = _haversine_km(ipp_lon[i], ipp_lat[i], ipp_lon, ipp_lat)
         mask = dists <= pair_radius_km
+        if target_elevation_threshold is not None:
+            mask &= target_elevation_mask
         if include_identity:
-            mask[i] = True
+            keep_source_identity = (
+                target_elevation_threshold is None
+                or target_elevation_keep_identity
+                or bool(target_elevation_mask[i])
+            )
+            mask[i] = keep_source_identity
         else:
             mask[i] = False
         candidates = np.where(mask)[0]
@@ -210,6 +244,7 @@ def build_pair_set_ratio_examples(
 
     src_idx = np.concatenate(src_parts)
     tgt_idx = np.concatenate(tgt_parts)
+    n_pairs_after_target_elevation_filter = int(len(src_idx))
     with np.errstate(divide="ignore", invalid="ignore"):
         raw_ratio = np.divide(
             target_stec[tgt_idx],
@@ -219,7 +254,7 @@ def build_pair_set_ratio_examples(
         )
     slm_pair_ratio = None
     if target_mode == "source_ratio":
-        labels = raw_ratio
+        linear_labels = raw_ratio
     else:
         assert mapping is not None
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -229,14 +264,20 @@ def build_pair_set_ratio_examples(
                 out=np.full(len(src_idx), np.nan, dtype=np.float64),
                 where=mapping[src_idx] > 0,
             )
-            labels = np.divide(
+            linear_labels = np.divide(
                 raw_ratio,
                 slm_pair_ratio,
                 out=np.full(len(src_idx), np.nan, dtype=np.float64),
                 where=np.abs(slm_pair_ratio) > 1e-12,
             )
+    labels, transform_finite = transform_training_labels(
+        linear_labels,
+        target_mode=target_mode,
+        target_transform=target_transform,
+    )
     finite = (
-        np.isfinite(labels)
+        transform_finite
+        & np.isfinite(linear_labels)
         & np.isfinite(raw_ratio)
         & np.isfinite(query_geom[tgt_idx]).all(axis=1)
     )
@@ -245,7 +286,9 @@ def build_pair_set_ratio_examples(
     src_idx = src_idx[finite]
     tgt_idx = tgt_idx[finite]
     labels = labels[finite]
+    linear_labels = linear_labels[finite]
     raw_ratio = raw_ratio[finite]
+    target_pair_elevation = target_elevation[tgt_idx]
     if slm_pair_ratio is not None:
         slm_pair_ratio = slm_pair_ratio[finite]
 
@@ -255,7 +298,9 @@ def build_pair_set_ratio_examples(
         src_idx = src_idx[keep]
         tgt_idx = tgt_idx[keep]
         labels = labels[keep]
+        linear_labels = linear_labels[keep]
         raw_ratio = raw_ratio[keep]
+        target_pair_elevation = target_pair_elevation[keep]
         if slm_pair_ratio is not None:
             slm_pair_ratio = slm_pair_ratio[keep]
 
@@ -301,15 +346,29 @@ def build_pair_set_ratio_examples(
 
     valid = OM.any(axis=1) & np.isfinite(labels)
     identity = src_idx == tgt_idx
+    identity_below_target_elevation = np.zeros_like(identity, dtype=bool)
+    if target_elevation_threshold is not None:
+        identity_below_target_elevation = identity & (
+            target_pair_elevation < target_elevation_threshold
+        )
     stats = {
         "target_mode": target_mode,
+        "target_transform": target_transform,
+        "min_target_elevation_deg": target_elevation_threshold,
+        "target_elevation_keep_identity": bool(target_elevation_keep_identity),
         "training_label_stats": _finite_stats(labels[valid]),
+        "linear_training_label_stats": _finite_stats(linear_labels[valid]),
         "raw_source_ratio_stats": _finite_stats(raw_ratio[valid]),
         "slm_pair_ratio_stats": _finite_stats(slm_pair_ratio[valid])
         if slm_pair_ratio is not None else None,
+        "target_elevation_stats": _finite_stats(target_pair_elevation[valid]),
+        "n_pairs_after_target_elevation_filter": n_pairs_after_target_elevation_filter,
         "n_pairs_before_context_filter": int(n_examples),
         "n_pairs_after_context_filter": int(valid.sum()),
         "n_identity_pairs": int(np.count_nonzero(identity[valid])),
+        "n_identity_below_target_elevation": int(
+            np.count_nonzero(identity_below_target_elevation[valid])
+        ),
         "identity_pair_fraction": float(np.count_nonzero(identity[valid]) / max(valid.sum(), 1)),
         "mean_context_neighbors": float(np.mean(n_context[valid])) if valid.any() else 0.0,
         "min_context_neighbors": int(np.min(n_context[valid])) if valid.any() else 0,
@@ -317,9 +376,10 @@ def build_pair_set_ratio_examples(
         "max_pair_examples": int(max_pair_examples) if max_pair_examples is not None else None,
         "same_epoch_pairs": False,
         "_identity_pair_mask": identity[valid],
+        "_identity_below_target_elevation_mask": identity_below_target_elevation[valid],
+        "_target_elevation_values": target_pair_elevation[valid],
     }
     return QG[valid], OF[valid], OM[valid], OD[valid], labels[valid], stats
-
 
 
 def build_pair_set_ratio_examples_same_epoch(
@@ -335,8 +395,11 @@ def build_pair_set_ratio_examples_same_epoch(
     include_identity: bool,
     max_pair_examples: int | None,
     seed: int,
+    min_target_elevation_deg: float | None = None,
+    target_elevation_keep_identity: bool = False,
     mapping_col: str | None = None,
     target_mode: str = "source_ratio",
+    target_transform: str = "linear",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Build set-ratio examples independently inside each timestamp."""
 
@@ -360,7 +423,10 @@ def build_pair_set_ratio_examples_same_epoch(
     OD_parts: list[np.ndarray] = []
     Y_parts: list[np.ndarray] = []
     identity_parts: list[np.ndarray] = []
+    identity_below_target_parts: list[np.ndarray] = []
+    target_elevation_parts: list[np.ndarray] = []
     epoch_stats: list[dict[str, Any]] = []
+    total_after_target_elevation_filter = 0
     total_before_context = 0
     total_after_context = 0
 
@@ -377,8 +443,11 @@ def build_pair_set_ratio_examples_same_epoch(
             include_identity=include_identity,
             max_pair_examples=per_epoch_cap,
             seed=seed + idx,
+            min_target_elevation_deg=min_target_elevation_deg,
+            target_elevation_keep_identity=target_elevation_keep_identity,
             mapping_col=mapping_col,
             target_mode=target_mode,
+            target_transform=target_transform,
         )
         QG_parts.append(QG)
         OF_parts.append(OF)
@@ -386,6 +455,13 @@ def build_pair_set_ratio_examples_same_epoch(
         OD_parts.append(OD)
         Y_parts.append(Y)
         identity_parts.append(stats["_identity_pair_mask"])
+        identity_below_target_parts.append(
+            stats["_identity_below_target_elevation_mask"]
+        )
+        target_elevation_parts.append(stats["_target_elevation_values"])
+        total_after_target_elevation_filter += int(
+            stats["n_pairs_after_target_elevation_filter"]
+        )
         total_before_context += int(stats["n_pairs_before_context_filter"])
         total_after_context += int(stats["n_pairs_after_context_filter"])
         epoch_stats.append(
@@ -395,10 +471,17 @@ def build_pair_set_ratio_examples_same_epoch(
                 "n_pairs_before_context_filter": int(
                     stats["n_pairs_before_context_filter"]
                 ),
+                "n_pairs_after_target_elevation_filter": int(
+                    stats["n_pairs_after_target_elevation_filter"]
+                ),
                 "n_pairs_after_context_filter": int(
                     stats["n_pairs_after_context_filter"]
                 ),
+                "target_elevation_stats": stats["target_elevation_stats"],
                 "n_identity_pairs": int(stats["n_identity_pairs"]),
+                "n_identity_below_target_elevation": int(
+                    stats["n_identity_below_target_elevation"]
+                ),
                 "mean_context_neighbors": float(stats["mean_context_neighbors"]),
             }
         )
@@ -409,6 +492,8 @@ def build_pair_set_ratio_examples_same_epoch(
     OD = np.concatenate(OD_parts, axis=0)
     Y = np.concatenate(Y_parts, axis=0)
     identity = np.concatenate(identity_parts, axis=0)
+    identity_below_target_elevation = np.concatenate(identity_below_target_parts, axis=0)
+    target_elevation_values = np.concatenate(target_elevation_parts, axis=0)
 
     if max_pair_examples is not None and len(Y) > int(max_pair_examples):
         rng = np.random.default_rng(seed)
@@ -419,21 +504,32 @@ def build_pair_set_ratio_examples_same_epoch(
         OD = OD[keep]
         Y = Y[keep]
         identity = identity[keep]
+        identity_below_target_elevation = identity_below_target_elevation[keep]
+        target_elevation_values = target_elevation_values[keep]
 
     n_context = OM.sum(axis=1)
     stats = {
         "target_mode": target_mode,
+        "target_transform": target_transform,
         "same_epoch_pairs": True,
         "n_training_epochs": int(len(groups)),
         "n_cross_epoch_pairs": 0,
         "same_epoch_per_epoch_cap": per_epoch_cap,
+        "min_target_elevation_deg": None
+        if min_target_elevation_deg is None else float(min_target_elevation_deg),
+        "target_elevation_keep_identity": bool(target_elevation_keep_identity),
         "training_label_stats": _finite_stats(Y),
         "raw_source_ratio_stats": None,
         "slm_pair_ratio_stats": None,
+        "target_elevation_stats": _finite_stats(target_elevation_values),
+        "n_pairs_after_target_elevation_filter": total_after_target_elevation_filter,
         "n_pairs_before_context_filter": total_before_context,
         "n_pairs_after_context_filter": int(len(Y)),
         "n_pairs_after_epoch_cap_pre_global_cap": total_after_context,
         "n_identity_pairs": int(np.count_nonzero(identity)),
+        "n_identity_below_target_elevation": int(
+            np.count_nonzero(identity_below_target_elevation)
+        ),
         "identity_pair_fraction": float(np.count_nonzero(identity) / max(len(Y), 1)),
         "mean_context_neighbors": float(np.mean(n_context)) if len(n_context) else 0.0,
         "min_context_neighbors": int(np.min(n_context)) if len(n_context) else 0,
@@ -441,10 +537,371 @@ def build_pair_set_ratio_examples_same_epoch(
         "max_pair_examples": int(max_pair_examples) if max_pair_examples is not None else None,
         "epoch_pair_stats": epoch_stats,
         "_identity_pair_mask": identity,
+        "_identity_below_target_elevation_mask": identity_below_target_elevation,
+        "_target_elevation_values": target_elevation_values,
     }
     return QG, OF, OM, OD, Y, stats
 
 
+def build_dynamic_pair_pool_same_epoch(
+    df: pd.DataFrame,
+    *,
+    source_stec_col: str,
+    target_stec_col: str,
+    obs_cols: list[str],
+    pair_radius_km: float,
+    max_target_neighbors: int,
+    include_identity: bool,
+    min_target_elevation_deg: float | None = None,
+    target_elevation_keep_identity: bool = False,
+    mapping_col: str | None = None,
+    target_mode: str = "source_ratio",
+    target_transform: str = "linear",
+) -> dict[str, Any]:
+    """Build an index-only same-epoch pair pool for dynamic resampling."""
+
+    if "timestamp" not in df.columns:
+        raise KeyError("--dynamic-pair-resampling requires --same-epoch-pairs and timestamp.")
+    n = len(df)
+    if n < 2:
+        raise ValueError("Dynamic set-ratio training requires at least 2 rows.")
+
+    timestamp_values = pd.to_datetime(df["timestamp"]).to_numpy()
+    epoch_series = pd.Series(timestamp_values)
+    groups = [
+        (pd.Timestamp(ts), np.asarray(pos, dtype=np.intp))
+        for ts, pos in sorted(epoch_series.groupby(epoch_series).indices.items())
+        if len(pos) >= 2
+    ]
+    if not groups:
+        raise ValueError("No timestamp group contains at least two training rays.")
+
+    ipp_lon = df["ipp_lon"].to_numpy(dtype=np.float64)
+    ipp_lat = df["ipp_lat"].to_numpy(dtype=np.float64)
+    query_geom = df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
+    context_base = df[obs_cols].to_numpy(dtype=np.float64)
+    index_values = df.index.to_numpy()
+    source_stec = df[source_stec_col].to_numpy(dtype=np.float64)
+    target_stec = df[target_stec_col].to_numpy(dtype=np.float64)
+    target_elevation = df["elevation"].to_numpy(dtype=np.float64)
+    target_elevation_threshold = (
+        None if min_target_elevation_deg is None else float(min_target_elevation_deg)
+    )
+    target_elevation_mask = np.ones(n, dtype=bool)
+    if target_elevation_threshold is not None:
+        target_elevation_mask = target_elevation >= target_elevation_threshold
+
+    mapping = None
+    if target_mode == "slm_correction":
+        if mapping_col is None:
+            raise ValueError("mapping_col is required for target_mode=slm_correction.")
+        if mapping_col not in df.columns:
+            raise KeyError(f"Training input is missing mapping column: {mapping_col}")
+        mapping = df[mapping_col].to_numpy(dtype=np.float64)
+    elif target_mode != "source_ratio":
+        raise ValueError(f"Unsupported set-ratio target mode: {target_mode}")
+
+    src_parts: list[np.ndarray] = []
+    tgt_parts: list[np.ndarray] = []
+    epoch_parts: list[np.ndarray] = []
+    epoch_pre_counts: list[int] = []
+
+    for epoch_id, (_, locs) in enumerate(groups):
+        pre_count = 0
+        epoch_ipp_lon = ipp_lon[locs]
+        epoch_ipp_lat = ipp_lat[locs]
+        for local_src, src in enumerate(locs):
+            dists = _haversine_km(
+                float(ipp_lon[src]),
+                float(ipp_lat[src]),
+                epoch_ipp_lon,
+                epoch_ipp_lat,
+            )
+            mask = dists <= pair_radius_km
+            if target_elevation_threshold is not None:
+                mask &= target_elevation_mask[locs]
+            if include_identity:
+                keep_source_identity = (
+                    target_elevation_threshold is None
+                    or target_elevation_keep_identity
+                    or bool(target_elevation_mask[src])
+                )
+                mask[local_src] = keep_source_identity
+            else:
+                mask[local_src] = False
+            candidates_local = np.where(mask)[0]
+            if len(candidates_local) > max_target_neighbors:
+                order = np.argsort(dists[candidates_local])
+                candidates_local = candidates_local[order[:max_target_neighbors]]
+            if len(candidates_local) == 0:
+                continue
+            targets = locs[candidates_local].astype(np.intp)
+            pre_count += int(len(targets))
+            src_parts.append(np.full(len(targets), int(src), dtype=np.intp))
+            tgt_parts.append(targets)
+            epoch_parts.append(np.full(len(targets), epoch_id, dtype=np.intp))
+        epoch_pre_counts.append(pre_count)
+
+    if not src_parts:
+        raise ValueError("No dynamic pair pool examples were created.")
+
+    src_idx = np.concatenate(src_parts)
+    tgt_idx = np.concatenate(tgt_parts)
+    epoch_id = np.concatenate(epoch_parts)
+    n_pairs_after_target_elevation_filter = int(len(src_idx))
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw_ratio = np.divide(
+            target_stec[tgt_idx],
+            source_stec[src_idx],
+            out=np.full(len(src_idx), np.nan, dtype=np.float64),
+            where=np.abs(source_stec[src_idx]) > 1e-12,
+        )
+    slm_pair_ratio = None
+    if target_mode == "source_ratio":
+        linear_labels = raw_ratio
+    else:
+        assert mapping is not None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slm_pair_ratio = np.divide(
+                mapping[tgt_idx],
+                mapping[src_idx],
+                out=np.full(len(src_idx), np.nan, dtype=np.float64),
+                where=mapping[src_idx] > 0,
+            )
+            linear_labels = np.divide(
+                raw_ratio,
+                slm_pair_ratio,
+                out=np.full(len(src_idx), np.nan, dtype=np.float64),
+                where=np.abs(slm_pair_ratio) > 1e-12,
+            )
+    labels, transform_finite = transform_training_labels(
+        linear_labels,
+        target_mode=target_mode,
+        target_transform=target_transform,
+    )
+    finite = (
+        transform_finite
+        & np.isfinite(linear_labels)
+        & np.isfinite(raw_ratio)
+        & np.isfinite(query_geom[tgt_idx]).all(axis=1)
+        & np.isfinite(context_base[src_idx]).all(axis=1)
+    )
+    if slm_pair_ratio is not None:
+        finite &= np.isfinite(slm_pair_ratio) & (slm_pair_ratio > 0)
+
+    src_idx = src_idx[finite]
+    tgt_idx = tgt_idx[finite]
+    epoch_id = epoch_id[finite]
+    labels = labels[finite]
+    linear_labels = linear_labels[finite]
+    raw_ratio = raw_ratio[finite]
+    target_pair_elevation = target_elevation[tgt_idx]
+    if slm_pair_ratio is not None:
+        slm_pair_ratio = slm_pair_ratio[finite]
+
+    identity = src_idx == tgt_idx
+    identity_below_target_elevation = np.zeros_like(identity, dtype=bool)
+    if target_elevation_threshold is not None:
+        identity_below_target_elevation = identity & (
+            target_pair_elevation < target_elevation_threshold
+        )
+
+    epoch_pair_indices: list[np.ndarray] = []
+    epoch_stats: list[dict[str, Any]] = []
+    for epoch_idx, (timestamp, locs) in enumerate(groups):
+        pair_locs = np.flatnonzero(epoch_id == epoch_idx)
+        epoch_pair_indices.append(pair_locs.astype(np.intp))
+        epoch_stats.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "rows": int(len(locs)),
+                "n_pairs_after_target_elevation_filter": int(
+                    epoch_pre_counts[epoch_idx]
+                ),
+                "n_pairs_after_context_filter": int(len(pair_locs)),
+                "n_identity_pairs": int(np.count_nonzero(identity[pair_locs])),
+                "n_identity_below_target_elevation": int(
+                    np.count_nonzero(identity_below_target_elevation[pair_locs])
+                ),
+            }
+        )
+
+    stats = {
+        "target_mode": target_mode,
+        "target_transform": target_transform,
+        "same_epoch_pairs": True,
+        "dynamic_pair_resampling": True,
+        "n_training_epochs": int(len(groups)),
+        "n_cross_epoch_pairs": 0,
+        "same_epoch_per_epoch_cap": None,
+        "min_target_elevation_deg": target_elevation_threshold,
+        "target_elevation_keep_identity": bool(target_elevation_keep_identity),
+        "training_label_stats": _finite_stats(labels),
+        "linear_training_label_stats": _finite_stats(linear_labels),
+        "raw_source_ratio_stats": _finite_stats(raw_ratio),
+        "slm_pair_ratio_stats": _finite_stats(slm_pair_ratio)
+        if slm_pair_ratio is not None else None,
+        "target_elevation_stats": _finite_stats(target_pair_elevation),
+        "n_pairs_after_target_elevation_filter": n_pairs_after_target_elevation_filter,
+        "n_pairs_before_context_filter": int(len(labels)),
+        "n_pairs_after_context_filter": int(len(labels)),
+        "n_pairs_after_epoch_cap_pre_global_cap": int(len(labels)),
+        "n_identity_pairs": int(np.count_nonzero(identity)),
+        "n_identity_below_target_elevation": int(
+            np.count_nonzero(identity_below_target_elevation)
+        ),
+        "identity_pair_fraction": float(np.count_nonzero(identity) / max(len(labels), 1)),
+        "mean_context_neighbors": 1.0,
+        "min_context_neighbors": 1 if len(labels) else 0,
+        "max_context_neighbors": 1 if len(labels) else 0,
+        "max_pair_examples": None,
+        "pair_pool_examples": int(len(labels)),
+        "epoch_pair_stats": epoch_stats,
+    }
+    return {
+        "src_idx": src_idx.astype(np.intp),
+        "tgt_idx": tgt_idx.astype(np.intp),
+        "epoch_id": epoch_id.astype(np.intp),
+        "labels": labels.astype(np.float64),
+        "linear_labels": linear_labels.astype(np.float64),
+        "raw_ratio": raw_ratio.astype(np.float64),
+        "slm_pair_ratio": None if slm_pair_ratio is None else slm_pair_ratio.astype(np.float64),
+        "identity": identity,
+        "identity_below_target_elevation": identity_below_target_elevation,
+        "target_pair_elevation": target_pair_elevation.astype(np.float64),
+        "epoch_pair_indices": epoch_pair_indices,
+        "query_geom": query_geom,
+        "context_base": context_base,
+        "ipp_lon": ipp_lon,
+        "ipp_lat": ipp_lat,
+        "index_values": index_values,
+        "obs_cols": obs_cols,
+        "stats": stats,
+    }
+
+
+def sample_dynamic_pair_indices(
+    pool: dict[str, Any],
+    *,
+    n_examples: int,
+    seed: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Sample pair-pool rows approximately evenly across timestamps."""
+
+    if n_examples <= 0:
+        raise ValueError("--dynamic-pair-examples must be positive.")
+    epoch_pair_indices = [
+        np.asarray(indices, dtype=np.intp)
+        for indices in pool["epoch_pair_indices"]
+        if len(indices) > 0
+    ]
+    if not epoch_pair_indices:
+        raise ValueError("Dynamic pair pool is empty after filtering.")
+    rng = np.random.default_rng(seed)
+    per_epoch_cap = max(1, int(np.ceil(int(n_examples) / len(epoch_pair_indices))))
+    sampled_parts: list[np.ndarray] = []
+    sampled_counts: list[int] = []
+    for indices in epoch_pair_indices:
+        k = min(len(indices), per_epoch_cap)
+        if k < len(indices):
+            chosen = rng.choice(indices, size=k, replace=False)
+        else:
+            chosen = indices.copy()
+        sampled_parts.append(chosen.astype(np.intp))
+        sampled_counts.append(int(len(chosen)))
+    sampled = np.concatenate(sampled_parts)
+    if len(sampled) > int(n_examples):
+        sampled = rng.choice(sampled, size=int(n_examples), replace=False)
+    rng.shuffle(sampled)
+    return sampled.astype(np.intp), {
+        "requested_pairs": int(n_examples),
+        "actual_pairs": int(len(sampled)),
+        "active_epochs": int(len(epoch_pair_indices)),
+        "per_epoch_cap": int(per_epoch_cap),
+        "min_pairs_per_epoch_before_global_cap": int(np.min(sampled_counts)),
+        "max_pairs_per_epoch_before_global_cap": int(np.max(sampled_counts)),
+        "mean_pairs_per_epoch_before_global_cap": float(np.mean(sampled_counts)),
+        "seed": int(seed),
+    }
+
+
+def materialize_pair_pool_examples(
+    pool: dict[str, Any],
+    pair_indices: np.ndarray,
+    *,
+    max_obs: int,
+    context_radius_km: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Turn sampled pair-pool rows into set-model tensors."""
+
+    pair_indices = np.asarray(pair_indices, dtype=np.intp)
+    src_idx = pool["src_idx"][pair_indices]
+    tgt_idx = pool["tgt_idx"][pair_indices]
+    query_geom = pool["query_geom"]
+    context_base = pool["context_base"]
+    ipp_lon = pool["ipp_lon"]
+    ipp_lat = pool["ipp_lat"]
+    index_values = pool["index_values"]
+    labels = pool["labels"][pair_indices]
+
+    n_examples = int(len(pair_indices))
+    n_obs_features = int(context_base.shape[1]) + 1
+    QG = query_geom[tgt_idx].astype(np.float64, copy=True)
+    OF = np.zeros((n_examples, max_obs, n_obs_features), dtype=np.float64)
+    OM = np.zeros((n_examples, max_obs), dtype=bool)
+    OD = np.full((n_examples, max_obs), np.inf, dtype=np.float64)
+
+    if max_obs == 1 and context_radius_km <= 0:
+        OF[:, 0, :-1] = context_base[src_idx]
+        OF[:, 0, -1] = 1.0
+        OM[:, 0] = True
+        OD[:, 0] = _haversine_km(
+            query_geom[tgt_idx, QUERY_FEATURE_COLS.index("ipp_lon")],
+            query_geom[tgt_idx, QUERY_FEATURE_COLS.index("ipp_lat")],
+            ipp_lon[src_idx],
+            ipp_lat[src_idx],
+        )
+        return QG, OF, OM, OD, labels.astype(np.float64, copy=True)
+
+    context_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for row, (src, tgt) in enumerate(zip(src_idx, tgt_idx)):
+        src_int = int(src)
+        if src_int not in context_cache:
+            context_cache[src_int] = _context_indices_for_source(
+                src_int,
+                source_ipp_lon=float(ipp_lon[src]),
+                source_ipp_lat=float(ipp_lat[src]),
+                context_ipp_lon=ipp_lon,
+                context_ipp_lat=ipp_lat,
+                context_index=index_values,
+                source_index_value=index_values[src],
+                radius_km=context_radius_km,
+                max_obs=max_obs,
+            )
+        candidates, _ = context_cache[src_int]
+        _fill_context_tensor(
+            out_features=OF,
+            out_mask=OM,
+            out_dists=OD,
+            row=row,
+            candidates=candidates,
+            source_index_value=index_values[src],
+            context_index=index_values,
+            context_base_features=context_base,
+            query_ipp_lon=float(query_geom[tgt, QUERY_FEATURE_COLS.index("ipp_lon")]),
+            query_ipp_lat=float(query_geom[tgt, QUERY_FEATURE_COLS.index("ipp_lat")]),
+            context_ipp_lon=ipp_lon,
+            context_ipp_lat=ipp_lat,
+        )
+    valid = OM.any(axis=1)
+    if not valid.all():
+        QG = QG[valid]
+        OF = OF[valid]
+        OM = OM[valid]
+        OD = OD[valid]
+        labels = labels[valid]
+    return QG, OF, OM, OD, labels.astype(np.float64, copy=True)
 def build_inference_context_sets(
     query_df: pd.DataFrame,
     context_df: pd.DataFrame,
@@ -558,6 +1015,17 @@ def _scale_obs(OF: np.ndarray, OM: np.ndarray, o_imp: Any, o_scaler: Any) -> np.
     return out
 
 
+
+def scale_obs_tensor(OF: np.ndarray, OM: np.ndarray, o_imp: Any, o_scaler: Any) -> np.ndarray:
+    """Scale observation tensors, vectorized for the common max_obs=1 case."""
+
+    if OF.shape[1] == 1:
+        out = np.zeros_like(OF)
+        valid = OM[:, 0]
+        if valid.any():
+            out[valid, 0] = o_scaler.transform(o_imp.transform(OF[valid, 0]))
+        return out
+    return _scale_obs(OF, OM, o_imp, o_scaler)
 def _anchor_source_geometry(
     obs_feat: np.ndarray,
     obs_mask: np.ndarray,
@@ -776,6 +1244,7 @@ def predict_set_ratio_conversion(
     y_scaler,
     hard_identity_ratio: bool,
     target_mode: str,
+    target_transform: str,
     batch_size: int,
     slant_QG_scaled: np.ndarray,
     slant_OF_scaled: np.ndarray,
@@ -819,9 +1288,9 @@ def predict_set_ratio_conversion(
         batch_size=batch_size,
     )
 
-    slant_model_output = np.maximum(slant_model_output, 0.0)
-    vertical_model_output = np.maximum(vertical_model_output, 0.0)
     if target_mode == "source_ratio":
+        slant_model_output = np.maximum(slant_model_output, 0.0)
+        vertical_model_output = np.maximum(vertical_model_output, 0.0)
         slant_ratio = slant_model_output
         vertical_ratio = vertical_model_output
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -830,8 +1299,16 @@ def predict_set_ratio_conversion(
         slant_correction = slant_correction_raw
         vertical_correction = vertical_correction_raw
     else:
-        slant_correction_raw = slant_model_output
-        vertical_correction_raw = vertical_model_output
+        if target_transform == "log":
+            slant_correction_raw = np.exp(slant_model_output)
+            vertical_correction_raw = np.exp(vertical_model_output)
+        elif target_transform == "linear":
+            slant_model_output = np.maximum(slant_model_output, 0.0)
+            vertical_model_output = np.maximum(vertical_model_output, 0.0)
+            slant_correction_raw = slant_model_output
+            vertical_correction_raw = vertical_model_output
+        else:
+            raise ValueError(f"Unsupported target transform: {target_transform}")
         slant_correction = apply_correction_shrinkage(
             slant_correction_raw, shrinkage_strength
         )
@@ -925,6 +1402,26 @@ def _make_delta_loader(ds, batch_size, seed, shuffle=True):
     )
 
 
+
+def _make_tensor_loader(q_geom, obs_feat, obs_mask, obs_dists, labels, batch_size, seed, shuffle=True):
+    """Build a DataLoader from tensors to avoid Python per-sample collation."""
+
+    g = torch.Generator()
+    g.manual_seed(seed)
+    ds = torch.utils.data.TensorDataset(
+        torch.tensor(q_geom, dtype=torch.float32),
+        torch.tensor(obs_feat, dtype=torch.float32),
+        torch.tensor(obs_mask, dtype=torch.bool),
+        torch.tensor(obs_dists, dtype=torch.float32),
+        torch.tensor(labels, dtype=torch.float32).view(-1, 1),
+    )
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=False,
+        generator=g,
+    )
 def _predict_hard_identity_ratio(
     model,
     device,
@@ -1048,28 +1545,72 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         train_df, test_df, args
     )
     split_metadata["elevation_filter"] = elevation_filter_metadata
-    pair_builder = (
-        build_pair_set_ratio_examples_same_epoch
-        if args.same_epoch_pairs else build_pair_set_ratio_examples
-    )
-    QG, OF, OM, OD, Y, pair_stats = pair_builder(
-        train_df,
-        source_stec_col=args.source_stec_column,
-        target_stec_col=args.slant_target_column,
-        obs_cols=obs_cols,
-        max_obs=args.max_obs,
-        context_radius_km=args.context_km,
-        pair_radius_km=args.nearby_km,
-        max_target_neighbors=args.nearby_max_neighbors,
-        include_identity=not args.no_identity,
-        max_pair_examples=args.max_pair_examples,
-        seed=args.seed,
-        mapping_col=args.mapping_column,
-        target_mode=args.target_mode,
-    )
+    if args.target_transform == "log" and args.target_mode != "slm_correction":
+        raise ValueError("--target-transform log requires --target-mode slm_correction.")
+    if args.dynamic_pair_resampling:
+        if not args.same_epoch_pairs:
+            raise ValueError("--dynamic-pair-resampling currently requires --same-epoch-pairs.")
+        if args.hard_identity_ratio:
+            raise ValueError("--dynamic-pair-resampling does not support --hard-identity-ratio.")
+        if args.dynamic_pair_examples is None or args.dynamic_pair_examples <= 0:
+            raise ValueError("--dynamic-pair-examples must be positive in dynamic mode.")
+        dynamic_pair_pool = build_dynamic_pair_pool_same_epoch(
+            train_df,
+            source_stec_col=args.source_stec_column,
+            target_stec_col=args.slant_target_column,
+            obs_cols=obs_cols,
+            pair_radius_km=args.nearby_km,
+            max_target_neighbors=args.nearby_max_neighbors,
+            include_identity=not args.no_identity,
+            min_target_elevation_deg=args.min_target_elevation_deg,
+            target_elevation_keep_identity=args.target_elevation_keep_identity,
+            mapping_col=args.mapping_column,
+            target_mode=args.target_mode,
+            target_transform=args.target_transform,
+        )
+        scaler_pair_count = int(args.dynamic_scaler_pair_examples)
+        scaler_indices, scaler_sample_stats = sample_dynamic_pair_indices(
+            dynamic_pair_pool,
+            n_examples=scaler_pair_count,
+            seed=args.seed + 100_000,
+        )
+        QG, OF, OM, OD, Y = materialize_pair_pool_examples(
+            dynamic_pair_pool,
+            scaler_indices,
+            max_obs=args.max_obs,
+            context_radius_km=args.context_km,
+        )
+        pair_stats = dict(dynamic_pair_pool["stats"])
+        pair_stats["dynamic_pair_examples"] = int(args.dynamic_pair_examples)
+        pair_stats["dynamic_scaler_pair_examples"] = scaler_pair_count
+        pair_stats["dynamic_scaler_sample"] = scaler_sample_stats
+        pair_stats["max_pair_examples"] = None
+    else:
+        dynamic_pair_pool = None
+        pair_builder = (
+            build_pair_set_ratio_examples_same_epoch
+            if args.same_epoch_pairs else build_pair_set_ratio_examples
+        )
+        QG, OF, OM, OD, Y, pair_stats = pair_builder(
+            train_df,
+            source_stec_col=args.source_stec_column,
+            target_stec_col=args.slant_target_column,
+            obs_cols=obs_cols,
+            max_obs=args.max_obs,
+            context_radius_km=args.context_km,
+            pair_radius_km=args.nearby_km,
+            max_target_neighbors=args.nearby_max_neighbors,
+            include_identity=not args.no_identity,
+            max_pair_examples=args.max_pair_examples,
+            seed=args.seed,
+            min_target_elevation_deg=args.min_target_elevation_deg,
+            target_elevation_keep_identity=args.target_elevation_keep_identity,
+            mapping_col=args.mapping_column,
+            target_mode=args.target_mode,
+            target_transform=args.target_transform,
+        )
     if len(Y) < 2:
         raise ValueError("Set-ratio training requires at least 2 valid examples.")
-
     from sklearn.impute import SimpleImputer
     from sklearn.preprocessing import StandardScaler
 
@@ -1083,7 +1624,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     obs_valid = OF.reshape(-1, OF.shape[-1])[OM.ravel()]
     o_imp.fit(obs_valid)
     o_scaler.fit(o_imp.transform(obs_valid))
-    OF_scaled = _scale_obs(OF, OM, o_imp, o_scaler)
+    OF_scaled = scale_obs_tensor(OF, OM, o_imp, o_scaler)
     identity_delta = compute_identity_delta(
         QG,
         OF,
@@ -1121,8 +1662,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
 
     slant_QG_scaled = q_scaler.transform(q_imp.transform(test_slant_geom)).astype(np.float64)
     vert_QG_scaled = q_scaler.transform(q_imp.transform(test_vert_geom)).astype(np.float64)
-    slant_OF_scaled = _scale_obs(slant_OF, slant_OM, o_imp, o_scaler)
-    vert_OF_scaled = _scale_obs(vert_OF, vert_OM, o_imp, o_scaler)
+    slant_OF_scaled = scale_obs_tensor(slant_OF, slant_OM, o_imp, o_scaler)
+    vert_OF_scaled = scale_obs_tensor(vert_OF, vert_OM, o_imp, o_scaler)
     slant_identity_delta = compute_identity_delta(
         test_slant_geom,
         slant_OF,
@@ -1171,7 +1712,10 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     epoch_metrics_rows: list[dict[str, float | int]] = []
 
     device = choose_device(args.device)
-    if args.hard_identity_ratio:
+    if args.dynamic_pair_resampling:
+        Y_scaled = y_scaler.fit_transform(Y.reshape(-1, 1)).ravel().astype(np.float64)
+        loader = None
+    elif args.hard_identity_ratio:
         loader = _make_delta_loader(
             _SetDeltaDataset(QG_scaled, OF_scaled, OM, OD, Y.astype(np.float64), identity_delta),
             args.batch_size,
@@ -1198,6 +1742,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     criterion = torch.nn.MSELoss()
     correction_mean_tensor = None
     correction_scale_tensor = None
+    correction_regularization_center = 0.0 if args.target_transform == "log" else 1.0
     if (
         args.target_mode == "slm_correction"
         and args.correction_regularization > 0
@@ -1212,6 +1757,38 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
 
     history = []
     for epoch in range(1, args.epochs + 1):
+        epoch_sample_stats = None
+        if args.dynamic_pair_resampling:
+            assert dynamic_pair_pool is not None
+            epoch_indices, epoch_sample_stats = sample_dynamic_pair_indices(
+                dynamic_pair_pool,
+                n_examples=int(args.dynamic_pair_examples),
+                seed=args.seed + epoch,
+            )
+            QG_epoch, OF_epoch, OM_epoch, OD_epoch, Y_epoch = materialize_pair_pool_examples(
+                dynamic_pair_pool,
+                epoch_indices,
+                max_obs=args.max_obs,
+                context_radius_km=args.context_km,
+            )
+            QG_epoch_scaled = q_scaler.transform(
+                q_imp.transform(QG_epoch)
+            ).astype(np.float64)
+            OF_epoch_scaled = scale_obs_tensor(OF_epoch, OM_epoch, o_imp, o_scaler)
+            Y_epoch_scaled = y_scaler.transform(
+                Y_epoch.reshape(-1, 1)
+            ).ravel().astype(np.float64)
+            loader = _make_tensor_loader(
+                QG_epoch_scaled,
+                OF_epoch_scaled,
+                OM_epoch,
+                OD_epoch,
+                Y_epoch_scaled,
+                args.batch_size,
+                args.seed + epoch,
+                shuffle=True,
+            )
+        assert loader is not None
         model.train()
         total_loss = 0.0
         total_count = 0
@@ -1237,7 +1814,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
                 else:
                     pred_label = pred * correction_scale_tensor + correction_mean_tensor
                 loss = loss + float(args.correction_regularization) * torch.mean(
-                    (pred_label - 1.0) ** 2
+                    (pred_label - correction_regularization_center) ** 2
                 )
             loss.backward()
             optimizer.step()
@@ -1245,7 +1822,10 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             total_loss += float(loss.detach().cpu()) * bs
             total_count += bs
         train_loss = total_loss / max(total_count, 1)
-        history.append({"epoch": epoch, "train_loss": train_loss})
+        history_row = {"epoch": epoch, "train_loss": train_loss}
+        if epoch_sample_stats is not None:
+            history_row["dynamic_sample"] = epoch_sample_stats
+        history.append(history_row)
         if should_record_epoch_metrics(
             epoch,
             enabled=epoch_metrics_enabled,
@@ -1259,6 +1839,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
                 y_scaler=y_scaler,
                 hard_identity_ratio=args.hard_identity_ratio,
                 target_mode=args.target_mode,
+                target_transform=args.target_transform,
                 batch_size=args.batch_size,
                 slant_QG_scaled=slant_QG_scaled,
                 slant_OF_scaled=slant_OF_scaled,
@@ -1281,6 +1862,9 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
                 target_vtec=target_vtec_eval,
                 predicted_vtec=epoch_outputs["vtec_set_ratio_mlp"],
             )
+            if epoch_sample_stats is not None:
+                metric_row["dynamic_sample_pairs"] = int(epoch_sample_stats["actual_pairs"])
+                metric_row["dynamic_per_epoch_cap"] = int(epoch_sample_stats["per_epoch_cap"])
             epoch_metrics_rows.append(metric_row)
             print(
                 "epoch_metrics "
@@ -1317,6 +1901,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         y_scaler=y_scaler,
         hard_identity_ratio=args.hard_identity_ratio,
         target_mode=args.target_mode,
+        target_transform=args.target_transform,
         batch_size=args.batch_size,
         slant_QG_scaled=slant_QG_scaled,
         slant_OF_scaled=slant_OF_scaled,
@@ -1392,12 +1977,23 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             max_rows=None,
         )
 
+    train_pair_metric_name = (
+        "train_pair_ratio"
+        if args.target_mode == "source_ratio"
+        else (
+            "train_pair_log_slm_correction"
+            if args.target_transform == "log"
+            else "train_pair_slm_correction"
+        )
+    )
+
     metadata: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "mode": f"simulation_set_context_{args.target_mode}"
         + ("_hard_identity" if args.hard_identity_ratio else ""),
         "model": "set_ratio_mlp",
         "target_mode": args.target_mode,
+        "target_transform": args.target_transform,
         "run_name": run_name,
         "input_file": str(input_path),
         "source_stec_column": args.source_stec_column,
@@ -1431,9 +2027,11 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "train_rows": int(len(train_df)),
             "test_rows": int(len(test_df)),
             "train_pair_examples": int(len(Y)),
+            "train_pair_pool_examples": int(pair_stats.get("pair_pool_examples", len(Y))),
         },
         "hyperparameters": {
             "target_mode": args.target_mode,
+            "target_transform": args.target_transform,
             "correction_regularization": float(args.correction_regularization),
             "elevation_shrinkage": bool(args.elevation_shrinkage),
             "shrinkage_start_deg": float(args.shrinkage_start_deg),
@@ -1456,8 +2054,16 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "max_obs": int(args.max_obs),
             "max_pair_examples": int(args.max_pair_examples)
             if args.max_pair_examples is not None else None,
+            "dynamic_pair_resampling": bool(args.dynamic_pair_resampling),
+            "dynamic_pair_examples": None
+            if args.dynamic_pair_examples is None else int(args.dynamic_pair_examples),
+            "dynamic_scaler_pair_examples": int(args.dynamic_scaler_pair_examples),
             "spatial_sigma_km": float(args.spatial_sigma_km),
             "include_identity": bool(not args.no_identity),
+            "min_target_elevation_deg": None
+            if args.min_target_elevation_deg is None
+            else float(args.min_target_elevation_deg),
+            "target_elevation_keep_identity": bool(args.target_elevation_keep_identity),
             "hard_identity_ratio": bool(args.hard_identity_ratio),
             "identity_delta_ipp_scale_km": float(args.identity_delta_ipp_scale_km),
             "inference_context": args.inference_context,
@@ -1486,11 +2092,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         },
         "metrics": {
             "train_pair_training_target": regression_metrics(Y, train_pred_label),
-            (
-                "train_pair_ratio"
-                if args.target_mode == "source_ratio"
-                else "train_pair_slm_correction"
-            ): regression_metrics(Y, train_pred_label),
+            train_pair_metric_name: regression_metrics(Y, train_pred_label),
             "test_slant_stec": regression_metrics(
                 predictions[args.slant_target_column],
                 predictions["stec_set_ratio_mlp"],
@@ -1552,6 +2154,12 @@ def parse_args(argv=None):
         help="Train either direct source-to-query ratio or correction to SLM geometry.",
     )
     p.add_argument(
+        "--target-transform",
+        choices=["linear", "log"],
+        default="linear",
+        help="Transform the training label; log is only valid for slm_correction.",
+    )
+    p.add_argument(
         "--correction-regularization",
         type=float,
         default=0.0,
@@ -1568,6 +2176,20 @@ def parse_args(argv=None):
     p.add_argument("--shrinkage-min-strength", type=float, default=0.0)
     p.add_argument("--min-train-elevation-deg", type=float)
     p.add_argument("--min-eval-elevation-deg", type=float)
+    p.add_argument(
+        "--min-target-elevation-deg",
+        type=float,
+        help="Restrict training pair target rays to this minimum elevation.",
+    )
+    p.add_argument(
+        "--target-elevation-keep-identity",
+        action="store_true",
+        help=(
+            "With --min-target-elevation-deg, keep source self-pairs i->i even "
+            "when the source elevation is below the target threshold. Ignored "
+            "when --no-identity is set."
+        ),
+    )
     p.add_argument("--split", choices=["random", "time", "station", "prn", "all"], default="random")
     p.add_argument("--test-keys-from")
     p.add_argument("--test-key-columns", default="timestamp,station,prn")
@@ -1615,6 +2237,9 @@ def parse_args(argv=None):
     p.add_argument("--context-km", type=float, default=200.0)
     p.add_argument("--nearby-max-neighbors", type=int, default=30)
     p.add_argument("--max-pair-examples", type=int)
+    p.add_argument("--dynamic-pair-resampling", action="store_true")
+    p.add_argument("--dynamic-pair-examples", type=int)
+    p.add_argument("--dynamic-scaler-pair-examples", type=int, default=200000)
     p.add_argument("--same-epoch-pairs", action="store_true", help="Build source-target training pairs and inference contexts only within each timestamp.")
     p.add_argument("--no-identity", action="store_true")
     p.add_argument("--hard-identity-ratio", action="store_true")

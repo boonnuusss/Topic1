@@ -3879,3 +3879,265 @@ For the current full-day `5min`, density-matched setup, use `33 epochs` as the
 observed best checkpoint (`RMSE = 0.5971`, `MAE = 0.4711`). In interpretation,
 report the stable best region as approximately `30-33 epochs`, because the RMSE
 difference between `30` and `33` epochs is negligible.
+
+## 2026-07-03 Experiment 052: High-Elevation Target Pair Sweep
+
+### Purpose
+
+Test whether restricting training-pair target rays to high elevations makes the
+set-ratio SLM-correction model closer to the real STEC-to-VTEC vertical-query
+scenario. The motivation was that the current pair objective uses slant-to-slant
+pairs, while evaluation queries a vertical ray.
+
+### Code Change
+
+`src.train_set_ratio_mlp` now supports:
+
+```text
+--min-target-elevation-deg <float>
+--target-elevation-keep-identity
+```
+
+Default behavior is strict: target candidates must satisfy the target elevation
+threshold, and self-pairs are also filtered. With `--target-elevation-keep-identity`,
+all source self-pairs are additionally kept as ratio=1 anchors, even if their
+source elevation is below the target threshold. `--no-identity` still disables
+self-pairs.
+
+Pair metadata now records target-elevation statistics and identity pairs below
+the target threshold.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Pairing: same-epoch nearby pairs only
+- Pair cap: `1,152,000`, natural available pair count per threshold
+- Train/eval source elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- Epoch checkpoints: `5,10,15,20,25,30,35,40,45,50`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Validation
+
+Compiled successfully:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_set_ratio_mlp.py
+```
+
+Smoke tests were run for `target>=80` strict and keep-identity with
+`--max-pair-examples 5000 --epochs 2`.
+
+- Strict: target elevation minimum was `80.0086 deg`; `n_identity_below_target_elevation = 0`.
+- Keep-identity: target elevation minimum dropped to `30.0201 deg` because low-elevation self-pairs were retained; `n_identity_below_target_elevation = 1615`.
+
+### Outputs
+
+```text
+results/tables/high_target_elevation_sweep_20260703.csv
+```
+
+### Results
+
+Reference current best before this experiment:
+
+```text
+Full-day 5min density-matched, no high-target filter, 33ep: RMSE = 0.5971
+```
+
+| Target threshold | Identity policy | Train pairs | Identity pairs | Identity below threshold | Best epoch | RMSE | MAE | Bias | R2 |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 70 | keep-identity | 1,124,811 | 284,310 | 248,645 | 30 | 0.6980 | 0.5336 | +0.2078 | 0.9968 |
+| 70 | strict | 1,030,722 | 41,431 | 0 | 50 | 0.7206 | 0.5449 | +0.2265 | 0.9966 |
+| 75 | keep-identity | 986,672 | 358,060 | 332,803 | 50 | 0.7371 | 0.5578 | +0.2290 | 0.9965 |
+| 75 | strict | 756,230 | 28,379 | 0 | 50 | 0.7485 | 0.5532 | +0.2010 | 0.9964 |
+| 80 | keep-identity | 752,089 | 413,414 | 399,549 | 40 | 0.7859 | 0.5837 | +0.2276 | 0.9960 |
+| 80 | strict | 362,932 | 14,135 | 0 | 50 | 0.8444 | 0.6167 | +0.2158 | 0.9954 |
+
+### Interpretation
+
+The high-elevation target-pair idea did not improve STEC-to-VTEC conversion in
+this implementation. All six settings are worse than the current best RMSE
+`0.5971`. The best high-target setting is `target>=70` with keep-identity
+(`RMSE = 0.6980`), still much worse than the original density-matched run.
+
+The trend is monotonic in the wrong direction: stricter target thresholds reduce
+available target geometry and worsen VTEC RMSE. Keeping identity pairs helps
+relative to strict filtering, but it does not recover the original model. This
+suggests that removing medium-elevation slant targets deprives the model of
+useful geometric diversity rather than making it more vertical-query aligned.
+
+### Decision
+
+Do not adopt high-elevation target filtering as the main route. Keep the feature
+as a diagnostic option, but retain the current no-target-filter density-matched
+model as the best set-ratio reference. Future improvement should focus on target
+objective design or dynamic pair sampling rather than simply forcing target rays
+to be high-elevation.
+
+## 2026-07-03 Experiment 053: Dynamic Pair Resampling with Linear SLM-Correction Target
+
+### Purpose
+
+Test whether resampling training pairs every epoch improves the full-day 5min
+set-ratio SLM-correction model. Previous density-matched static sampling used a
+fixed `1.152M` pair set and reached the current reference RMSE `0.5971` at epoch
+33. Dynamic resampling instead builds the complete same-epoch eligible pair pool
+once, then samples a fresh subset every epoch.
+
+### Code Change
+
+`src.train_set_ratio_mlp` now supports:
+
+```text
+--dynamic-pair-resampling
+--dynamic-pair-examples <int>
+--dynamic-scaler-pair-examples <int>
+--target-transform linear|log
+```
+
+Dynamic mode currently requires `--same-epoch-pairs`. The scaler is fitted once
+from a fixed dynamic-scaler sample, then each training epoch draws a new pair
+subset from the same eligible pool. For the common source-anchor setting
+`max_obs=1, context_km=0`, observation tensor scaling and dynamic DataLoader
+creation were optimized without changing the training objective.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Target transform: `linear`
+- Eligible pair pool: `7,525,405` same-epoch nearby pairs
+- Dynamic scaler sample: `200,000` pairs
+- Dynamic training samples: `100,000` or `200,000` pairs per epoch
+- Epochs: `150`
+- Evaluation checkpoints: every 5 epochs from `5` to `150`
+- Train/eval source elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Validation
+
+Compiled successfully:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_set_ratio_mlp.py
+```
+
+Smoke tests were run for dynamic linear and dynamic log targets with
+`--dynamic-pair-examples 5000 --dynamic-scaler-pair-examples 5000 --epochs 2`.
+Both produced predictions, metrics JSON, checkpoints, and two-row epoch metrics
+CSVs.
+
+### Outputs
+
+```text
+results/tables/dynamic_resampling_log_target_sweep_20260703.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_dyn100k_linear_slm_corr_shrink_e150_epoch_metrics.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_dyn200k_linear_slm_corr_shrink_e150_epoch_metrics.csv
+```
+
+### Results
+
+Reference before this experiment:
+
+```text
+Full-day 5min, static density-matched, no target filter, 33ep: RMSE = 0.5971
+```
+
+| Target transform | Dynamic pairs/epoch | Best epoch | RMSE | MAE | Bias | R2 | Train loss |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| linear | 100,000 | 110 | 0.5980 | 0.4736 | +0.1971 | 0.9977 | 0.2288 |
+| linear | 200,000 | 90 | 0.5937 | 0.4702 | +0.1997 | 0.9977 | 0.2017 |
+
+### Interpretation
+
+Dynamic resampling is useful when the per-epoch sample is large enough. The
+`100k` linear run is essentially tied with the static reference, while the
+`200k` linear run improves RMSE from `0.5971` to `0.5937` TECU. The best epoch
+moves later than the static 33-epoch setting because each dynamic epoch sees only
+a subset of the pool, but the model is exposed to fresh pair combinations across
+training.
+
+### Decision
+
+Keep dynamic pair resampling as an active main-line option. For linear
+SLM-correction targets, `200k pairs/epoch` is preferred over `100k pairs/epoch`.
+
+## 2026-07-03 Experiment 054: Log SLM-Correction Target under Dynamic Resampling
+
+### Purpose
+
+Test whether learning `log(correction)` is better than learning the linear SLM
+correction factor directly. The motivation is that the SLM-correction target is
+multiplicative and centered near 1; in log space the neutral correction is 0 and
+positive/negative deviations are more symmetric.
+
+### Setup
+
+Same as Experiment 053, except:
+
+```text
+--target-transform log
+```
+
+For `target_mode=slm_correction`, the training label is:
+
+```text
+log((target_STEC/source_STEC) / (target_mapping/source_mapping))
+```
+
+During inference, the model output is exponentiated back to a linear correction
+before applying elevation-dependent shrinkage and converting STEC to VTEC.
+Correction regularization is centered at `log_correction = 0` in log mode.
+
+### Outputs
+
+```text
+results/tables/dynamic_resampling_log_target_sweep_20260703.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_dyn100k_log_slm_corr_shrink_e150_epoch_metrics.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_dyn200k_log_slm_corr_shrink_e150_epoch_metrics.csv
+```
+
+### Results
+
+| Target transform | Dynamic pairs/epoch | Best epoch | RMSE | MAE | Bias | R2 | Train loss |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| log | 100,000 | 110 | 0.5943 | 0.4716 | +0.1327 | 0.9977 | 0.2286 |
+| log | 200,000 | 90 | 0.5913 | 0.4665 | +0.2092 | 0.9977 | 0.2017 |
+
+### Combined Ranking
+
+| Rank | Target transform | Dynamic pairs/epoch | Best epoch | RMSE | MAE | Bias |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | log | 200,000 | 90 | 0.5913 | 0.4665 | +0.2092 |
+| 2 | linear | 200,000 | 90 | 0.5937 | 0.4702 | +0.1997 |
+| 3 | log | 100,000 | 110 | 0.5943 | 0.4716 | +0.1327 |
+| 4 | linear | 100,000 | 110 | 0.5980 | 0.4736 | +0.1971 |
+| reference | static linear | 1,152,000 fixed pairs | 33 | 0.5971 | 0.4711 | +0.2042 |
+
+### Interpretation
+
+Log correction improves the dynamic runs. At `100k` pairs/epoch, log target
+reduces RMSE from `0.5980` to `0.5943` and substantially reduces bias. At `200k`
+pairs/epoch, log target gives the best observed result so far: `RMSE = 0.5913`
+TECU and `MAE = 0.4665` TECU.
+
+The improvement is modest but consistent with the multiplicative nature of the
+correction target. The remaining bias is still positive, so further work should
+focus on bias control or calibration rather than simply increasing epoch count.
+
+### Decision
+
+Adopt `dynamic pair resampling + log SLM-correction target + 200k pairs/epoch` as
+the new best set-ratio reference for the fixed UT05:00 high-elevation holdout:
+
+```text
+Full-day 5min dynamic log, 200k pairs/epoch, best epoch 90: RMSE = 0.5913
+```
