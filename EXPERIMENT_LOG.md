@@ -4141,3 +4141,210 @@ the new best set-ratio reference for the fixed UT05:00 high-elevation holdout:
 ```text
 Full-day 5min dynamic log, 200k pairs/epoch, best epoch 90: RMSE = 0.5913
 ```
+
+## 2026-07-04 Experiment 055: Static Log SLM-Correction Target without Dynamic Resampling
+
+### Purpose
+
+Isolate the effect of the `log` target transform by disabling dynamic pair
+resampling. This tests whether the improvement in Experiment 054 came from
+`log(correction)` itself or from dynamic pair resampling.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Target transform: `log`
+- Pairing: same-epoch nearby pairs only
+- Pair sampling: static fixed pair set, no dynamic resampling
+- Pair cap: `1,152,000`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Train/eval source elevation filter: `elevation >= 30 deg`
+- Epochs: `150`
+- Evaluation checkpoints: every 5 epochs from `5` to `150`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Outputs
+
+```text
+results/tables/static_log_only_sweep_20260704.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_static_log_slm_corr_shrink_e150_p1152k_epoch_metrics.csv
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_static_log_slm_corr_shrink_e150_p1152k_predictions.parquet
+results/tables/set_ratio_mlp_0000_2400_5min_ut05keys_high30_static_log_slm_corr_shrink_e150_p1152k_metrics.json
+results/checkpoints/set_ratio_mlp_0000_2400_5min_ut05keys_high30_static_log_slm_corr_shrink_e150_p1152k.pth
+```
+
+### Results
+
+Best checkpoints in this run:
+
+| Epoch | Train loss | RMSE | MAE | Bias | R2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 30 | 0.1659 | 0.5984 | 0.4815 | +0.1968 | 0.9977 |
+| 65 | 0.1336 | 0.6025 | 0.4769 | +0.1976 | 0.9976 |
+| 85 | 0.1245 | 0.6085 | 0.4809 | +0.2007 | 0.9976 |
+| 75 | 0.1293 | 0.6105 | 0.4801 | +0.2269 | 0.9976 |
+| 70 | 0.1309 | 0.6132 | 0.4885 | +0.2127 | 0.9976 |
+
+Comparison with the relevant references:
+
+| Setting | Best epoch | RMSE | MAE | Bias |
+| --- | ---: | ---: | ---: | ---: |
+| Static linear density-matched | 33 | 0.5971 | 0.4711 | +0.2042 |
+| Static log-only density-matched | 30 | 0.5984 | 0.4815 | +0.1968 |
+| Dynamic linear 200k/epoch | 90 | 0.5937 | 0.4702 | +0.1997 |
+| Dynamic log 200k/epoch | 90 | 0.5913 | 0.4665 | +0.2092 |
+
+### Interpretation
+
+Using `log(correction)` alone does not improve the static density-matched setup.
+The best static log checkpoint (`RMSE = 0.5984`) is slightly worse than the
+previous static linear best (`RMSE = 0.5971`) and has worse MAE. Therefore, the
+main gain observed in Experiment 054 should not be attributed to the log target
+alone.
+
+The useful combination appears to be dynamic pair resampling plus the log target:
+dynamic resampling provides fresh geometric pair coverage across epochs, while
+log correction gives a small additional benefit under that dynamic sampling
+regime.
+
+### Decision
+
+Do not replace the static density-matched baseline with static log-only training.
+Keep the current best reference as:
+
+```text
+Full-day 5min dynamic log, 200k pairs/epoch, best epoch 90: RMSE = 0.5913
+```
+
+## 2026-07-04 Experiment 056: Dynamic Log Time-Window Sweep
+
+### Purpose
+
+Evaluate whether the current best modeling route, `dynamic pair resampling + log
+SLM-correction target + 200k pairs/epoch`, benefits from a restricted training
+time window rather than the full `UT00:00-24:00` dataset. The evaluation remains
+the fixed UT05:00 high-elevation holdout.
+
+### Code Change
+
+`src.train_set_ratio_mlp` now supports training-window filtering:
+
+```text
+--train-window-start <timestamp>
+--train-window-end <timestamp>
+```
+
+The filter is applied only to `train_df`, after key-holdout splitting and before
+elevation filtering. The test/evaluation rows are not filtered, preserving the
+fixed UT05:00 holdout. The interval is half-open:
+
+```text
+train_window_start <= timestamp < train_window_end
+```
+
+Run metadata records the configured window, pre/post-window training rows,
+post-window epoch count, and observed training timestamp min/max.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Target transform: `log`
+- Dynamic resampling: `200,000` pairs per epoch
+- Dynamic scaler sample: `200,000` pairs
+- Epochs: `150`
+- Checkpoints: every 5 epochs from `5` to `150`
+- Pairing/context: same-epoch, `nearby_km=200`, `nearby_max_neighbors=30`, `max_obs=1`, `context_km=0`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Train/eval source elevation filter: `elevation >= 30 deg`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Validation
+
+Compiled successfully:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_set_ratio_mlp.py
+```
+
+Smoke test:
+
+```text
+train window: UT04:00-08:00
+dynamic pairs: 5,000/epoch
+scaler pairs: 5,000
+epochs: 2
+```
+
+The smoke metadata confirmed that the training window reduced train rows before
+elevation filtering from `597,249` to `98,777`, while the fixed key-holdout test
+set remained unchanged before elevation filtering (`419` rows). After the
+`elevation >= 30 deg` filter, the test set was `302` rows.
+
+### Outputs
+
+```text
+results/tables/time_window_dynamic_log_sweep_20260704.csv
+results/tables/time_window_dynamic_log_sweep_20260704_stage_a.csv
+results/tables/time_window_dynamic_log_sweep_20260704_stage_b.csv
+```
+
+### Results
+
+Reference before this experiment:
+
+```text
+Full-day UT00:00-24:00 dynamic log 200k/epoch: RMSE = 0.5913, best epoch = 90
+```
+
+| Stage | Train window | Hours | Train rows | Pair pool | Best epoch | RMSE | MAE | Bias | R2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A | UT04:00-08:00 | 4 | 69,550 | 1,254,477 | 70 | 0.5591 | 0.4489 | +0.1691 | 0.9980 |
+| A | UT02:00-10:00 | 8 | 138,758 | 2,497,718 | 60 | 0.5629 | 0.4497 | +0.1865 | 0.9979 |
+| A | UT02:00-12:00 | 10 | 173,760 | 3,126,105 | 95 | 0.5641 | 0.4442 | +0.1907 | 0.9979 |
+| A | UT04:00-12:00 | 8 | 137,904 | 2,467,845 | 100 | 0.5658 | 0.4483 | +0.1900 | 0.9979 |
+| A | UT00:00-10:00 | 10 | 175,193 | 3,164,734 | 150 | 0.5693 | 0.4544 | +0.2084 | 0.9979 |
+| A | UT02:00-08:00 | 6 | 105,406 | 1,912,737 | 25 | 0.5697 | 0.4526 | +0.1716 | 0.9979 |
+| B | UT03:00-08:00 | 5 | 87,249 | 1,574,622 | 85 | 0.5740 | 0.4602 | +0.1895 | 0.9979 |
+| A | UT04:00-10:00 | 6 | 102,902 | 1,839,458 | 50 | 0.5752 | 0.4593 | +0.1926 | 0.9978 |
+| A | UT00:00-12:00 | 12 | 210,195 | 3,793,121 | 135 | 0.5800 | 0.4668 | +0.2340 | 0.9978 |
+| A | UT00:00-08:00 | 8 | 141,841 | 2,579,753 | 130 | 0.5804 | 0.4639 | +0.1941 | 0.9978 |
+| B | UT04:00-09:00 | 5 | 86,368 | 1,545,305 | 25 | 0.5864 | 0.4750 | +0.2100 | 0.9978 |
+| reference | UT00:00-24:00 | 24 | 418,070 | 7,525,405 | 90 | 0.5913 | 0.4665 | +0.2092 | 0.9977 |
+
+### Interpretation
+
+Restricting the training data to a UT05-centered local window improves the fixed
+UT05:00 STEC-to-VTEC conversion experiment substantially. The best setting is
+`UT04:00-08:00`, with RMSE `0.5591` TECU, improving on the full-day reference by
+about `0.0322` TECU.
+
+The trend is not simply "more data is better". Full-day training is the worst in
+this comparison, and extending the best local window to `UT04:00-09:00` or
+`UT04:00-10:00` degrades performance. Windows beginning at `UT02:00` are also
+strong, especially `UT02:00-10:00`, but the most local `UT04:00-08:00` window has
+the best RMSE and the lowest bias among the top settings.
+
+Stage B did not improve on Stage A. The adjacent windows around `UT04:00-08:00`
+were worse: `UT03:00-08:00` RMSE `0.5740`, and `UT04:00-09:00` RMSE `0.5864`.
+This suggests that, for this fixed UT05 holdout, the best useful training context
+is close in time and not necessarily expanded by one hour.
+
+### Decision
+
+For fixed UT05:00 high-elevation evaluation, promote the following as the best
+observed time-window setting:
+
+```text
+UT04:00-08:00, dynamic log, 200k pairs/epoch, best epoch 70: RMSE = 0.5591
+```
+
+Keep full-day dynamic log as the broader-coverage reference, but do not treat it
+as the best model for a fixed local-time UT05 conversion task.

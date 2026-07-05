@@ -18,6 +18,7 @@ datasets/processed/*
 results/tables/*
 results/figures/*
 results/checkpoints/*
+results/logs/*
 
 # Scientific/model artifacts should be regenerated from scripts, not committed
 *.npz

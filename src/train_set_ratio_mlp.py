@@ -1472,6 +1472,56 @@ def choose_set_ratio_split(
     return choose_simulation_split(df, args)
 
 
+def apply_train_window_filter(
+    train_df: pd.DataFrame,
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Optionally restrict training rows to a half-open timestamp window."""
+
+    start_raw = args.train_window_start
+    end_raw = args.train_window_end
+    before = int(len(train_df))
+    if not start_raw and not end_raw:
+        timestamps = pd.to_datetime(train_df["timestamp"]) if "timestamp" in train_df.columns else None
+        return train_df, {
+            "enabled": False,
+            "train_window_start": None,
+            "train_window_end": None,
+            "train_rows_before_window": before,
+            "train_rows_after_window": before,
+            "n_train_epochs_after_window": int(timestamps.nunique()) if timestamps is not None else None,
+            "train_timestamp_min": None if timestamps is None or timestamps.empty else pd.Timestamp(timestamps.min()).isoformat(),
+            "train_timestamp_max": None if timestamps is None or timestamps.empty else pd.Timestamp(timestamps.max()).isoformat(),
+        }
+    if not start_raw or not end_raw:
+        raise ValueError("Both --train-window-start and --train-window-end are required.")
+    if "timestamp" not in train_df.columns:
+        raise KeyError("--train-window-start/end requires a timestamp column.")
+
+    start = pd.Timestamp(start_raw)
+    end = pd.Timestamp(end_raw)
+    if end <= start:
+        raise ValueError("--train-window-end must be later than --train-window-start.")
+
+    timestamps = pd.to_datetime(train_df["timestamp"])
+    mask = (timestamps >= start) & (timestamps < end)
+    filtered = train_df.loc[mask].copy()
+    filtered_ts = pd.to_datetime(filtered["timestamp"]) if not filtered.empty else pd.Series(dtype="datetime64[ns]")
+    if len(filtered) < 2:
+        raise ValueError(
+            "Training time-window filtering left fewer than 2 rows; "
+            "widen --train-window-start/end."
+        )
+    return filtered, {
+        "enabled": True,
+        "train_window_start": start.isoformat(),
+        "train_window_end": end.isoformat(),
+        "train_rows_before_window": before,
+        "train_rows_after_window": int(len(filtered)),
+        "n_train_epochs_after_window": int(filtered_ts.nunique()),
+        "train_timestamp_min": None if filtered_ts.empty else pd.Timestamp(filtered_ts.min()).isoformat(),
+        "train_timestamp_max": None if filtered_ts.empty else pd.Timestamp(filtered_ts.max()).isoformat(),
+    }
 def apply_elevation_filters(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
@@ -1541,6 +1591,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     require_columns(df, required)
 
     train_df, test_df, split_metadata = choose_set_ratio_split(df, args)
+    train_df, train_window_metadata = apply_train_window_filter(train_df, args)
+    split_metadata["train_window"] = train_window_metadata
     train_df, test_df, elevation_filter_metadata = apply_elevation_filters(
         train_df, test_df, args
     )
@@ -2026,6 +2078,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "input": int(len(df)),
             "train_rows": int(len(train_df)),
             "test_rows": int(len(test_df)),
+            "n_train_epochs": int(pd.to_datetime(train_df["timestamp"]).nunique())
+            if "timestamp" in train_df.columns else None,
             "train_pair_examples": int(len(Y)),
             "train_pair_pool_examples": int(pair_stats.get("pair_pool_examples", len(Y))),
         },
@@ -2068,6 +2122,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "identity_delta_ipp_scale_km": float(args.identity_delta_ipp_scale_km),
             "inference_context": args.inference_context,
             "same_epoch_pairs": bool(args.same_epoch_pairs),
+            "train_window_start": args.train_window_start,
+            "train_window_end": args.train_window_end,
             "min_train_elevation_deg": None
             if args.min_train_elevation_deg is None
             else float(args.min_train_elevation_deg),
@@ -2195,6 +2251,8 @@ def parse_args(argv=None):
     p.add_argument("--test-key-columns", default="timestamp,station,prn")
     p.add_argument("--test-size", type=float, default=0.2)
     p.add_argument("--train-end")
+    p.add_argument("--train-window-start")
+    p.add_argument("--train-window-end")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument(
