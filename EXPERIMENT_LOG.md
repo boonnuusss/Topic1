@@ -4348,3 +4348,96 @@ UT04:00-08:00, dynamic log, 200k pairs/epoch, best epoch 70: RMSE = 0.5591
 
 Keep full-day dynamic log as the broader-coverage reference, but do not treat it
 as the best model for a fixed local-time UT05 conversion task.
+
+## 2026-07-06 Experiment 057: UT04-08 Static Density-Matched Log Target
+
+### Purpose
+
+Experiment 056 found the best fixed-UT05 time-window setting to be:
+
+```text
+UT04:00-08:00, dynamic log, 200k pairs/epoch, best epoch 70: RMSE = 0.5591
+```
+
+This experiment isolates whether dynamic pair resampling is still necessary in
+that best local window. The comparison uses the same `UT04:00-08:00` training
+window and the same log SLM-correction target, but replaces dynamic resampling
+with a static density-matched pair set.
+
+### Setup
+
+- Dataset: `datasets/interim/iri_simulation_20240505_0000_2400_5min_spacing2p5_regular.parquet`
+- Train window: `UT04:00-08:00`
+- Window epochs: `48` 5min epochs
+- Density-matched static pair cap: `48 * 4000 = 192,000`
+- Model: set-ratio MLP, source-anchor context only
+- Target: `slm_correction`
+- Target transform: `log`
+- Dynamic resampling: disabled
+- Pairing/context: same-epoch, `nearby_km=200`, `nearby_max_neighbors=30`, `max_obs=1`, `context_km=0`
+- Shrinkage: `s30_e90_p4_min0.1`
+- Train/eval source elevation filter: `elevation >= 30 deg`
+- Epochs: `150`
+- Checkpoints: every 5 epochs from `5` to `150`
+- Fixed UT05:00 key holdout from
+  `results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet`
+- `vtec_iri_ref` remains evaluation-only and is not used in training.
+
+### Outputs
+
+```text
+results/tables/tw0400_0800_static_vs_dynamic_log_20260706.csv
+results/tables/set_ratio_mlp_20240505_tw0400_0800_ut05keys_high30_static_log_slm_corr_shrink_e150_p192k_epoch_metrics.csv
+results/tables/set_ratio_mlp_20240505_tw0400_0800_ut05keys_high30_static_log_slm_corr_shrink_e150_p192k_predictions.parquet
+results/tables/set_ratio_mlp_20240505_tw0400_0800_ut05keys_high30_static_log_slm_corr_shrink_e150_p192k_metrics.json
+results/checkpoints/set_ratio_mlp_20240505_tw0400_0800_ut05keys_high30_static_log_slm_corr_shrink_e150_p192k.pth
+```
+
+### Results
+
+Best checkpoints for the static density-matched run:
+
+| Epoch | Train loss | RMSE | MAE | Bias | R2 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.1600 | 0.5586 | 0.4384 | +0.1624 | 0.9980 |
+| 15 | 0.1937 | 0.5657 | 0.4522 | +0.1502 | 0.9979 |
+| 75 | 0.1076 | 0.5700 | 0.4536 | +0.2119 | 0.9979 |
+| 10 | 0.2296 | 0.5732 | 0.4492 | +0.0650 | 0.9979 |
+| 145 | 0.0835 | 0.5808 | 0.4621 | +0.2140 | 0.9978 |
+
+Direct comparison in the same `UT04:00-08:00` window:
+
+| Setting | Train-pair policy | Best epoch | RMSE | MAE | Bias | R2 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Static density-matched log | fixed `192,000` pairs | 25 | 0.5586 | 0.4384 | +0.1624 | 0.9980 |
+| Dynamic log | resample `200,000` pairs/epoch | 70 | 0.5591 | 0.4489 | +0.1691 | 0.9980 |
+
+Both settings share the same eligible same-epoch pair pool size before sampling:
+`1,254,477` pairs.
+
+### Interpretation
+
+For the best local `UT04:00-08:00` window, static density-matched training is not
+worse than dynamic resampling. It is slightly better in this run: RMSE improves
+by about `0.0005` TECU, MAE by about `0.0106` TECU, and bias by about `0.0067`
+TECU. The RMSE difference is tiny, so it should be interpreted as a practical tie
+rather than a large methodological advantage.
+
+The result suggests that dynamic resampling was useful when training on broader
+windows, but once the time window is tightly localized around UT05, a compact
+fixed density-matched pair set is sufficient and may be easier to interpret. The
+best epoch also shifts much earlier (`25` vs `70`), so local-window static runs
+should not use the longer dynamic-run epoch as a default.
+
+### Decision
+
+For fixed UT05:00 high-elevation evaluation, use the following as the current
+best observed setting:
+
+```text
+UT04:00-08:00, static density-matched log, 192k fixed pairs, best epoch 25:
+RMSE = 0.5586
+```
+
+Keep the dynamic `UT04:00-08:00` run as a near-equivalent reference, but prefer
+the static density-matched result for simplicity and slightly better MAE/bias.
