@@ -35,6 +35,37 @@ This order keeps the comparison anchored to the classical thin-shell
 ionospheric projection model while making the evaluation target clear:
 conversion accuracy from STEC to VTEC.
 
+## Paper Evaluation Protocol
+
+Publication-oriented set-ratio experiments use three distinct roles:
+
+1. `train`: fits pair examples, scalers, and model parameters.
+2. `validation`: selects the epoch with minimum VTEC RMSE and saves that
+   model as the main checkpoint.
+3. `locked test`: is evaluated once after best-checkpoint selection; it must
+   not influence epoch or hyperparameter choices.
+
+The historical UT05 key set
+`results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet` is now a
+validation set. Results such as RMSE `0.5586 TECU` are validation results, not
+final independent-test claims.
+
+`src.train_set_ratio_mlp` implements the protocol through:
+
+```text
+--validation-keys-from <validation keys>
+--test-keys-from <locked independent-test keys>
+```
+
+When validation is configured, epoch diagnostics run on validation only, the
+minimum-validation-RMSE state is restored, and locked-test predictions are
+created afterward. Historical commands without `--validation-keys-from`
+remain executable but are labeled `legacy_two_way` in metadata.
+
+The reproducible wrapper is
+`scripts/train_set_ratio_paper_protocol.ps1`. The next scientific requirement
+is an independent-day locked-test key manifest.
+
 ## Legacy Off-mainline Code
 
 The following entry points were implemented during an earlier STEC-prediction

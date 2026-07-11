@@ -46,6 +46,11 @@ IRI-backed simulation experiment for ML-assisted conversion.
   hybrid-gate exploration is diagnostic rather than a mainline objective.
 - [x] Implement and test a source-ratio set/context model with a source-anchor
   observation flag.
+- [x] Implement train/validation/locked-test key protocol for the leading
+  set-ratio route.
+- [x] Save and restore the minimum-validation-RMSE checkpoint before final
+  predictions.
+- [x] Reclassify the repeatedly reused UT05 key holdout as validation.
 - [ ] Validate the leading set-ratio anchor-only model under station, time, PRN,
   and independent-day splits.
 - [ ] Validate core RayMLP / Set-to-Query STEC-to-VTEC conversion on independent
@@ -73,13 +78,13 @@ preserved for reference but are not the current mainline:
 
 ## Highest Priority Next
 
-Validate the source-ratio set-anchor model under strict splits and independent
-days. It is the current best UT05:00 random pure-model result, but random splits
-can be optimistic. Hybrid gates remain useful for IRI simulation diagnostics,
-but they should not drive the main research direction because real observation
-data do not provide VTEC truth for choosing the best gate. Prioritize truth-free
-model behavior, physically pre-specified conversion rules, and larger
-multi-epoch validation.
+Create an independent-day locked-test key manifest and evaluate the frozen
+set-ratio paper protocol exactly once after validation checkpoint selection.
+The current UT05 key set is validation because it has already guided extensive
+model development. Then validate station, time, PRN, and constellation
+generalization with multiple seeds. Hybrid gates remain simulation diagnostics;
+they should not drive the main research direction because real observations do
+not provide VTEC truth for gate selection.
 
 ## Blocked / Needs User Decision
 

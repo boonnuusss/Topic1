@@ -1,3 +1,23 @@
+## Paper Evaluation Protocol
+
+Use `train_set_ratio_paper_protocol.ps1` for the current set-ratio paper
+protocol. The historical UT05 key set is passed as validation, not test:
+
+```powershell
+.\scripts\train_set_ratio_paper_protocol.ps1
+```
+
+When an independent locked-test key file is available, pass it explicitly:
+
+```powershell
+.\scripts\train_set_ratio_paper_protocol.ps1 -InputPath datasets\interim\multiday_iri.parquet -LockedTestKeysFrom configs\splits\independent_day_test_keys.csv
+```
+
+Validation VTEC RMSE selects and saves the best checkpoint. Locked-test truth is
+evaluated once only after that checkpoint has been restored. Runs without
+`--validation-keys-from` retain the historical two-way behavior and are marked
+`legacy_two_way` in metadata.
+
 # Scripts
 
 This directory contains thin wrappers around reproducible command-line

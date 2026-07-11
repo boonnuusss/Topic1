@@ -1451,16 +1451,118 @@ def _predict_hard_identity_ratio(
 def choose_set_ratio_split(
     df: pd.DataFrame,
     args: argparse.Namespace,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    """Choose train/evaluation rows for set-ratio simulation experiments."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Choose train, validation, and locked-test rows.
+
+    Key-based validation is the publication protocol. The older two-way split
+    remains available so historical commands keep working, but it is marked as
+    legacy in metadata and cannot drive best-checkpoint selection.
+    """
+
+    validation_keys_from = getattr(args, "validation_keys_from", None)
+    validation_key_columns = getattr(
+        args, "validation_key_columns", "timestamp,station,prn"
+    )
+
+    def key_mask(
+        key_path_raw: str,
+        key_columns_raw: str,
+        *,
+        marker: str,
+    ) -> tuple[np.ndarray, list[str]]:
+        key_df = read_table(Path(key_path_raw))
+        key_columns = [
+            column.strip()
+            for column in key_columns_raw.split(",")
+            if column.strip()
+        ]
+        if not key_columns:
+            raise ValueError("Key holdout requires at least one key column.")
+        require_columns(df, key_columns)
+        require_columns(key_df, key_columns)
+        left = df.loc[:, key_columns].copy()
+        right = key_df.loc[:, key_columns].drop_duplicates().copy()
+        if "timestamp" in key_columns:
+            left["timestamp"] = pd.to_datetime(left["timestamp"])
+            right["timestamp"] = pd.to_datetime(right["timestamp"])
+        matched = left.reset_index(drop=True).merge(
+            right.assign(**{marker: True}),
+            on=key_columns,
+            how="left",
+            sort=False,
+        )
+        return matched[marker].fillna(False).to_numpy(bool), key_columns
+
+    if validation_keys_from:
+        if args.split == "all":
+            raise ValueError(
+                "--validation-keys-from cannot be used with --split all."
+            )
+        validation_mask, validation_columns = key_mask(
+            validation_keys_from,
+            validation_key_columns,
+            marker="_set_ratio_validation_key",
+        )
+        test_mask = np.zeros(len(df), dtype=bool)
+        test_columns: list[str] | None = None
+        if args.test_keys_from:
+            test_mask, test_columns = key_mask(
+                args.test_keys_from,
+                args.test_key_columns,
+                marker="_set_ratio_test_key",
+            )
+        overlap = validation_mask & test_mask
+        if np.any(overlap):
+            raise ValueError(
+                "Validation and locked-test key files overlap: "
+                f"{int(np.count_nonzero(overlap))} input rows match both."
+            )
+        train_mask = ~(validation_mask | test_mask)
+        train_df = df.loc[train_mask].copy()
+        validation_df = df.loc[validation_mask].copy()
+        test_df = df.loc[test_mask].copy()
+        if train_df.empty or validation_df.empty:
+            raise ValueError(
+                "Three-way key protocol requires non-empty train and "
+                f"validation rows; train={len(train_df)}, "
+                f"validation={len(validation_df)}."
+            )
+        if args.test_keys_from and test_df.empty:
+            raise ValueError("Locked-test key file matched no input rows.")
+        protocol = (
+            "train_validation_locked_test"
+            if args.test_keys_from
+            else "train_validation"
+        )
+        return train_df, validation_df, test_df, {
+            "protocol": protocol,
+            "type": "key_holdout",
+            "validation_keys_from": str(validation_keys_from),
+            "validation_key_columns": validation_columns,
+            "test_keys_from": (
+                None if not args.test_keys_from else str(args.test_keys_from)
+            ),
+            "test_key_columns": test_columns,
+            "n_train": int(len(train_df)),
+            "n_validation": int(len(validation_df)),
+            "n_test": int(len(test_df)),
+            "train_validation_overlap": False,
+            "train_test_overlap": False,
+            "validation_test_overlap": False,
+            "test_role": (
+                "locked_final_evaluation" if len(test_df) else "not_configured"
+            ),
+        }
 
     if args.split == "all":
         if args.test_keys_from:
             raise ValueError("--test-keys-from cannot be used with --split all.")
         full_df = df.copy()
-        return full_df, full_df.copy(), {
+        return full_df, df.iloc[0:0].copy(), full_df.copy(), {
+            "protocol": "legacy_all_data_diagnostic",
             "type": "all",
             "n_train": int(len(full_df)),
+            "n_validation": 0,
             "n_test": int(len(full_df)),
             "train_test_overlap": True,
             "interpretation": (
@@ -1469,7 +1571,19 @@ def choose_set_ratio_split(
                 "evaluation-only and is not used as a training label."
             ),
         }
-    return choose_simulation_split(df, args)
+    train_df, test_df, metadata = choose_simulation_split(df, args)
+    metadata = dict(metadata)
+    metadata.update(
+        {
+            "protocol": "legacy_two_way",
+            "n_validation": 0,
+            "interpretation": (
+                "Backward-compatible two-way split. This test/evaluation set "
+                "must not be used for publication checkpoint selection."
+            ),
+        }
+    )
+    return train_df, df.iloc[0:0].copy(), test_df, metadata
 
 
 def apply_train_window_filter(
@@ -1521,15 +1635,18 @@ def apply_train_window_filter(
         "n_train_epochs_after_window": int(filtered_ts.nunique()),
         "train_timestamp_min": None if filtered_ts.empty else pd.Timestamp(filtered_ts.min()).isoformat(),
         "train_timestamp_max": None if filtered_ts.empty else pd.Timestamp(filtered_ts.max()).isoformat(),
+
     }
 def apply_elevation_filters(
     train_df: pd.DataFrame,
+    validation_df: pd.DataFrame,
     test_df: pd.DataFrame,
     args: argparse.Namespace,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    """Optionally restrict train/evaluation rows by source-ray elevation."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Optionally restrict train/validation/test rows by source elevation."""
 
     train_before = int(len(train_df))
+    validation_before = int(len(validation_df))
     test_before = int(len(test_df))
     train_min = args.min_train_elevation_deg
     eval_min = args.min_eval_elevation_deg
@@ -1537,6 +1654,11 @@ def apply_elevation_filters(
     if train_min is not None:
         train_df = train_df.loc[
             pd.to_numeric(train_df["elevation"], errors="coerce") >= float(train_min)
+        ].copy()
+    if eval_min is not None and not validation_df.empty:
+        validation_df = validation_df.loc[
+            pd.to_numeric(validation_df["elevation"], errors="coerce")
+            >= float(eval_min)
         ].copy()
     if eval_min is not None:
         test_df = test_df.loc[
@@ -1548,20 +1670,243 @@ def apply_elevation_filters(
             "Elevation filtering left fewer than 2 training rays; "
             "relax --min-train-elevation-deg."
         )
-    if len(test_df) == 0:
+    if validation_before and len(validation_df) == 0:
         raise ValueError(
-            "Elevation filtering left no evaluation rays; "
+            "Elevation filtering left no validation rays; "
+            "relax --min-eval-elevation-deg."
+        )
+    if test_before and len(test_df) == 0:
+        raise ValueError(
+            "Elevation filtering left no locked-test rays; "
             "relax --min-eval-elevation-deg."
         )
 
-    return train_df, test_df, {
+    return train_df, validation_df, test_df, {
         "min_train_elevation_deg": None if train_min is None else float(train_min),
         "min_eval_elevation_deg": None if eval_min is None else float(eval_min),
         "train_rows_before": train_before,
         "train_rows_after": int(len(train_df)),
+        "validation_rows_before": validation_before,
+        "validation_rows_after": int(len(validation_df)),
         "test_rows_before": test_before,
         "test_rows_after": int(len(test_df)),
     }
+
+def build_evaluation_context(
+    train_df: pd.DataFrame,
+    evaluation_df: pd.DataFrame,
+    *,
+    inference_context: str,
+) -> pd.DataFrame:
+    """Return context rows without exposing another held-out partition."""
+
+    if inference_context == "train":
+        return train_df
+    combined = pd.concat([train_df, evaluation_df], axis=0)
+    return combined.loc[~combined.index.duplicated(keep="first")].copy()
+
+
+def prepare_set_ratio_evaluation(
+    evaluation_df: pd.DataFrame,
+    context_df: pd.DataFrame,
+    *,
+    args: argparse.Namespace,
+    obs_cols: list[str],
+    q_imp: Any,
+    q_scaler: Any,
+    o_imp: Any,
+    o_scaler: Any,
+) -> dict[str, Any]:
+    """Prepare scaled geometry and context arrays for one held-out role."""
+
+    slant_geom = evaluation_df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
+    vertical_base = build_vertical_target_geometry(
+        evaluation_df, vertical_top_km=args.vertical_top_km
+    )[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
+    vertical_geom = np.column_stack(
+        [vertical_base, evaluation_df[TIME_COLS].to_numpy(dtype=np.float64)]
+    )
+
+    slant_obs, slant_mask, slant_dist, slant_context_stats = (
+        build_inference_context_sets(
+            evaluation_df,
+            context_df,
+            target_geom=slant_geom,
+            obs_cols=obs_cols,
+            max_obs=args.max_obs,
+            context_radius_km=args.context_km,
+            same_epoch_context=args.same_epoch_pairs,
+        )
+    )
+    vertical_obs, vertical_mask, vertical_dist, vertical_context_stats = (
+        build_inference_context_sets(
+            evaluation_df,
+            context_df,
+            target_geom=vertical_geom,
+            obs_cols=obs_cols,
+            max_obs=args.max_obs,
+            context_radius_km=args.context_km,
+            same_epoch_context=args.same_epoch_pairs,
+        )
+    )
+
+    slant_geom_scaled = q_scaler.transform(
+        q_imp.transform(slant_geom)
+    ).astype(np.float64)
+    vertical_geom_scaled = q_scaler.transform(
+        q_imp.transform(vertical_geom)
+    ).astype(np.float64)
+    slant_obs_scaled = scale_obs_tensor(
+        slant_obs, slant_mask, o_imp, o_scaler
+    )
+    vertical_obs_scaled = scale_obs_tensor(
+        vertical_obs, vertical_mask, o_imp, o_scaler
+    )
+    slant_identity_delta = compute_identity_delta(
+        slant_geom,
+        slant_obs,
+        slant_mask,
+        ipp_scale_km=args.identity_delta_ipp_scale_km,
+    )
+    vertical_identity_delta = compute_identity_delta(
+        vertical_geom,
+        vertical_obs,
+        vertical_mask,
+        ipp_scale_km=args.identity_delta_ipp_scale_km,
+    )
+
+    mapping_i = QUERY_FEATURE_COLS.index("slant_factor")
+    source_mapping = evaluation_df[args.mapping_column].to_numpy(dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slm_slant_ratio = np.divide(
+            slant_geom[:, mapping_i],
+            source_mapping,
+            out=np.full(len(evaluation_df), np.nan, dtype=np.float64),
+            where=source_mapping > 0,
+        )
+        slm_vertical_ratio = np.divide(
+            vertical_geom[:, mapping_i],
+            source_mapping,
+            out=np.full(len(evaluation_df), np.nan, dtype=np.float64),
+            where=source_mapping > 0,
+        )
+    source_elevation = evaluation_df["elevation"].to_numpy(dtype=np.float64)
+    shrinkage_enabled = bool(
+        args.elevation_shrinkage and args.target_mode == "slm_correction"
+    )
+    shrinkage_strength = elevation_shrinkage_strength(
+        source_elevation,
+        enabled=shrinkage_enabled,
+        start_deg=args.shrinkage_start_deg,
+        end_deg=args.shrinkage_end_deg,
+        power=args.shrinkage_power,
+        min_strength=args.shrinkage_min_strength,
+    )
+    return {
+        "df": evaluation_df,
+        "slant_QG_scaled": slant_geom_scaled,
+        "slant_OF_scaled": slant_obs_scaled,
+        "slant_OM": slant_mask,
+        "slant_OD": slant_dist,
+        "slant_identity_delta": slant_identity_delta,
+        "vert_QG_scaled": vertical_geom_scaled,
+        "vert_OF_scaled": vertical_obs_scaled,
+        "vert_OM": vertical_mask,
+        "vert_OD": vertical_dist,
+        "vertical_identity_delta": vertical_identity_delta,
+        "slm_slant_ratio": slm_slant_ratio,
+        "slm_vertical_ratio": slm_vertical_ratio,
+        "shrinkage_strength": shrinkage_strength,
+        "source_stec_eval": evaluation_df[
+            args.source_stec_column
+        ].to_numpy(dtype=np.float64),
+        "target_vtec_eval": evaluation_df[
+            args.vtec_target_column
+        ].to_numpy(dtype=np.float64),
+        "slant_context_stats": slant_context_stats,
+        "vertical_context_stats": vertical_context_stats,
+    }
+
+
+def predict_set_ratio_evaluation(
+    *,
+    model: Any,
+    device: Any,
+    y_scaler: Any,
+    args: argparse.Namespace,
+    bundle: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """Predict one validation or locked-test partition."""
+
+    outputs = predict_set_ratio_conversion(
+        model=model,
+        device=device,
+        y_scaler=y_scaler,
+        hard_identity_ratio=args.hard_identity_ratio,
+        target_mode=args.target_mode,
+        target_transform=args.target_transform,
+        batch_size=args.batch_size,
+        slant_QG_scaled=bundle["slant_QG_scaled"],
+        slant_OF_scaled=bundle["slant_OF_scaled"],
+        slant_OM=bundle["slant_OM"],
+        slant_OD=bundle["slant_OD"],
+        slant_identity_delta=bundle["slant_identity_delta"],
+        vert_QG_scaled=bundle["vert_QG_scaled"],
+        vert_OF_scaled=bundle["vert_OF_scaled"],
+        vert_OM=bundle["vert_OM"],
+        vert_OD=bundle["vert_OD"],
+        vertical_identity_delta=bundle["vertical_identity_delta"],
+        slm_slant_ratio=bundle["slm_slant_ratio"],
+        slm_vertical_ratio=bundle["slm_vertical_ratio"],
+        shrinkage_strength=bundle["shrinkage_strength"],
+        source_stec_eval=bundle["source_stec_eval"],
+    )
+    predictions = bundle["df"].copy()
+    predictions["set_ratio_slant_identity_delta"] = bundle[
+        "slant_identity_delta"
+    ]
+    predictions["set_ratio_vertical_identity_delta"] = bundle[
+        "vertical_identity_delta"
+    ]
+    predictions["set_ratio_slant_slm_ratio"] = bundle["slm_slant_ratio"]
+    predictions["set_ratio_vertical_slm_ratio"] = bundle["slm_vertical_ratio"]
+    predictions["set_ratio_slant_model_output"] = outputs["slant_model_output"]
+    predictions["set_ratio_vertical_model_output"] = outputs[
+        "vertical_model_output"
+    ]
+    predictions["set_ratio_elevation_shrinkage_strength"] = bundle[
+        "shrinkage_strength"
+    ]
+    for name in (
+        "slant_correction_raw",
+        "vertical_correction_raw",
+        "slant_correction",
+        "vertical_correction",
+        "slant_ratio",
+        "vertical_ratio",
+    ):
+        predictions[f"set_ratio_{name}"] = outputs[name]
+    predictions["stec_set_ratio_mlp"] = outputs["stec_set_ratio_mlp"]
+    predictions["vtec_set_ratio_mlp"] = outputs["vtec_set_ratio_mlp"]
+    predictions["vtec_set_ratio_mlp_direct"] = outputs["vtec_set_ratio_mlp"]
+    predictions["vtec_set_ratio_mlp_error_iri"] = (
+        predictions["vtec_set_ratio_mlp"]
+        - predictions[args.vtec_target_column]
+    )
+    predictions["vtec_set_ratio_mlp_abs_error_iri"] = predictions[
+        "vtec_set_ratio_mlp_error_iri"
+    ].abs()
+    return predictions, outputs
+
+
+def clone_model_state(model: Any) -> dict[str, torch.Tensor]:
+    """Copy model parameters to CPU for deterministic best-state restore."""
+
+    return {
+        name: value.detach().cpu().clone()
+        for name, value in model.state_dict().items()
+    }
+
 
 def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     set_random_seed(args.seed)
@@ -1590,11 +1935,13 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
     )
     require_columns(df, required)
 
-    train_df, test_df, split_metadata = choose_set_ratio_split(df, args)
+    train_df, validation_df, test_df, split_metadata = choose_set_ratio_split(
+        df, args
+    )
     train_df, train_window_metadata = apply_train_window_filter(train_df, args)
     split_metadata["train_window"] = train_window_metadata
-    train_df, test_df, elevation_filter_metadata = apply_elevation_filters(
-        train_df, test_df, args
+    train_df, validation_df, test_df, elevation_filter_metadata = (
+        apply_elevation_filters(train_df, validation_df, test_df, args)
     )
     split_metadata["elevation_filter"] = elevation_filter_metadata
     if args.target_transform == "log" and args.target_mode != "slm_correction":
@@ -1684,84 +2031,40 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         ipp_scale_km=args.identity_delta_ipp_scale_km,
     )
 
-    context_df = df if args.inference_context == "all_observed" else train_df
-    test_slant_geom = test_df[QUERY_FEATURE_COLS].to_numpy(dtype=np.float64)
-    test_vert_base = build_vertical_target_geometry(
-        test_df, vertical_top_km=args.vertical_top_km
-    )[TARGET_GEOMETRY_COLUMNS].to_numpy(dtype=np.float64)
-    test_vert_geom = np.column_stack(
-        [test_vert_base, test_df[TIME_COLS].to_numpy(dtype=np.float64)]
+    has_validation = not validation_df.empty
+    selection_df = validation_df if has_validation else test_df
+    selection_role = "validation" if has_validation else "legacy_test"
+    selection_context_df = build_evaluation_context(
+        train_df,
+        selection_df,
+        inference_context=args.inference_context,
     )
-
-    slant_OF, slant_OM, slant_OD, slant_context_stats = build_inference_context_sets(
-        test_df,
-        context_df,
-        target_geom=test_slant_geom,
+    selection_bundle = prepare_set_ratio_evaluation(
+        selection_df,
+        selection_context_df,
+        args=args,
         obs_cols=obs_cols,
-        max_obs=args.max_obs,
-        context_radius_km=args.context_km,
-        same_epoch_context=args.same_epoch_pairs,
+        q_imp=q_imp,
+        q_scaler=q_scaler,
+        o_imp=o_imp,
+        o_scaler=o_scaler,
     )
-    vert_OF, vert_OM, vert_OD, vert_context_stats = build_inference_context_sets(
-        test_df,
-        context_df,
-        target_geom=test_vert_geom,
-        obs_cols=obs_cols,
-        max_obs=args.max_obs,
-        context_radius_km=args.context_km,
-        same_epoch_context=args.same_epoch_pairs,
+    slant_context_stats = selection_bundle["slant_context_stats"]
+    vert_context_stats = selection_bundle["vertical_context_stats"]
+    slant_identity_delta = selection_bundle["slant_identity_delta"]
+    vertical_identity_delta = selection_bundle["vertical_identity_delta"]
+    shrinkage_strength = selection_bundle["shrinkage_strength"]
+    target_vtec_eval = selection_bundle["target_vtec_eval"]
+    shrinkage_enabled = bool(
+        args.elevation_shrinkage and args.target_mode == "slm_correction"
     )
-
-    slant_QG_scaled = q_scaler.transform(q_imp.transform(test_slant_geom)).astype(np.float64)
-    vert_QG_scaled = q_scaler.transform(q_imp.transform(test_vert_geom)).astype(np.float64)
-    slant_OF_scaled = scale_obs_tensor(slant_OF, slant_OM, o_imp, o_scaler)
-    vert_OF_scaled = scale_obs_tensor(vert_OF, vert_OM, o_imp, o_scaler)
-    slant_identity_delta = compute_identity_delta(
-        test_slant_geom,
-        slant_OF,
-        slant_OM,
-        ipp_scale_km=args.identity_delta_ipp_scale_km,
-    )
-    vertical_identity_delta = compute_identity_delta(
-        test_vert_geom,
-        vert_OF,
-        vert_OM,
-        ipp_scale_km=args.identity_delta_ipp_scale_km,
-    )
-    mapping_i = QUERY_FEATURE_COLS.index("slant_factor")
-    source_mapping_eval = test_df[args.mapping_column].to_numpy(dtype=np.float64)
-    slant_target_mapping = test_slant_geom[:, mapping_i]
-    vertical_target_mapping = test_vert_geom[:, mapping_i]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        slm_slant_ratio = np.divide(
-            slant_target_mapping,
-            source_mapping_eval,
-            out=np.full(len(test_df), np.nan, dtype=np.float64),
-            where=source_mapping_eval > 0,
-        )
-        slm_vertical_ratio = np.divide(
-            vertical_target_mapping,
-            source_mapping_eval,
-            out=np.full(len(test_df), np.nan, dtype=np.float64),
-            where=source_mapping_eval > 0,
-        )
-    source_elevation_eval = test_df["elevation"].to_numpy(dtype=np.float64)
-    shrinkage_enabled = bool(args.elevation_shrinkage and args.target_mode == "slm_correction")
-    shrinkage_strength = elevation_shrinkage_strength(
-        source_elevation_eval,
-        enabled=shrinkage_enabled,
-        start_deg=args.shrinkage_start_deg,
-        end_deg=args.shrinkage_end_deg,
-        power=args.shrinkage_power,
-        min_strength=args.shrinkage_min_strength,
-    )
-    source_stec_eval = test_df[args.source_stec_column].to_numpy(dtype=np.float64)
-    target_vtec_eval = test_df[args.vtec_target_column].to_numpy(dtype=np.float64)
     epoch_metrics_enabled = bool(args.epoch_metrics or args.epoch_metrics_epochs)
     epoch_metrics_epochs = parse_epoch_metrics_epochs(
         args.epoch_metrics_epochs, args.epochs
     )
     epoch_metrics_rows: list[dict[str, float | int]] = []
+    best_validation_state: dict[str, torch.Tensor] | None = None
+    best_validation_metric: dict[str, float | int] | None = None
 
     device = choose_device(args.device)
     if args.dynamic_pair_resampling:
@@ -1880,33 +2183,17 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         history.append(history_row)
         if should_record_epoch_metrics(
             epoch,
-            enabled=epoch_metrics_enabled,
+            enabled=epoch_metrics_enabled or has_validation,
             every=args.epoch_metrics_every,
             selected_epochs=epoch_metrics_epochs,
             final_epoch=args.epochs,
         ):
-            epoch_outputs = predict_set_ratio_conversion(
+            _, epoch_outputs = predict_set_ratio_evaluation(
                 model=model,
                 device=device,
                 y_scaler=y_scaler,
-                hard_identity_ratio=args.hard_identity_ratio,
-                target_mode=args.target_mode,
-                target_transform=args.target_transform,
-                batch_size=args.batch_size,
-                slant_QG_scaled=slant_QG_scaled,
-                slant_OF_scaled=slant_OF_scaled,
-                slant_OM=slant_OM,
-                slant_OD=slant_OD,
-                slant_identity_delta=slant_identity_delta,
-                vert_QG_scaled=vert_QG_scaled,
-                vert_OF_scaled=vert_OF_scaled,
-                vert_OM=vert_OM,
-                vert_OD=vert_OD,
-                vertical_identity_delta=vertical_identity_delta,
-                slm_slant_ratio=slm_slant_ratio,
-                slm_vertical_ratio=slm_vertical_ratio,
-                shrinkage_strength=shrinkage_strength,
-                source_stec_eval=source_stec_eval,
+                args=args,
+                bundle=selection_bundle,
             )
             metric_row = build_epoch_metric_row(
                 epoch=epoch,
@@ -1918,8 +2205,15 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
                 metric_row["dynamic_sample_pairs"] = int(epoch_sample_stats["actual_pairs"])
                 metric_row["dynamic_per_epoch_cap"] = int(epoch_sample_stats["per_epoch_cap"])
             epoch_metrics_rows.append(metric_row)
+            if has_validation and (
+                best_validation_metric is None
+                or float(metric_row["rmse_tecu"])
+                < float(best_validation_metric["rmse_tecu"])
+            ):
+                best_validation_metric = dict(metric_row)
+                best_validation_state = clone_model_state(model)
             print(
-                "epoch_metrics "
+                f"{selection_role}_metrics "
                 f"epoch={metric_row['epoch']} "
                 f"train_loss={metric_row['train_loss']:.6g} "
                 f"rmse={metric_row['rmse_tecu']:.4f} "
@@ -1927,6 +2221,18 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
                 f"bias={metric_row['bias_tecu']:+.4f} "
                 f"r2={metric_row['r2']:.4f}"
             )
+
+    if has_validation:
+        if best_validation_state is None or best_validation_metric is None:
+            raise RuntimeError(
+                "Validation was configured but no checkpoint metric was recorded."
+            )
+        model.load_state_dict(best_validation_state)
+        selected_epoch = int(best_validation_metric["epoch"])
+        selected_model_source = "best_validation_rmse"
+    else:
+        selected_epoch = int(args.epochs)
+        selected_model_source = "final_epoch_legacy_protocol"
 
     if args.hard_identity_ratio:
         train_pred_label = _predict_hard_identity_ratio(
@@ -1947,87 +2253,105 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             train_pred_scaled.reshape(-1, 1)
         ).ravel()
 
-    final_outputs = predict_set_ratio_conversion(
+    selection_predictions, selection_outputs = predict_set_ratio_evaluation(
         model=model,
         device=device,
         y_scaler=y_scaler,
-        hard_identity_ratio=args.hard_identity_ratio,
-        target_mode=args.target_mode,
-        target_transform=args.target_transform,
-        batch_size=args.batch_size,
-        slant_QG_scaled=slant_QG_scaled,
-        slant_OF_scaled=slant_OF_scaled,
-        slant_OM=slant_OM,
-        slant_OD=slant_OD,
-        slant_identity_delta=slant_identity_delta,
-        vert_QG_scaled=vert_QG_scaled,
-        vert_OF_scaled=vert_OF_scaled,
-        vert_OM=vert_OM,
-        vert_OD=vert_OD,
-        vertical_identity_delta=vertical_identity_delta,
-        slm_slant_ratio=slm_slant_ratio,
-        slm_vertical_ratio=slm_vertical_ratio,
-        shrinkage_strength=shrinkage_strength,
-        source_stec_eval=source_stec_eval,
+        args=args,
+        bundle=selection_bundle,
     )
-    slant_model_output = final_outputs["slant_model_output"]
-    vertical_model_output = final_outputs["vertical_model_output"]
-    slant_correction_raw = final_outputs["slant_correction_raw"]
-    vertical_correction_raw = final_outputs["vertical_correction_raw"]
-    slant_correction = final_outputs["slant_correction"]
-    vertical_correction = final_outputs["vertical_correction"]
-    slant_ratio = final_outputs["slant_ratio"]
-    vertical_ratio = final_outputs["vertical_ratio"]
-    predictions = test_df.copy()
-    predictions["set_ratio_slant_identity_delta"] = slant_identity_delta
-    predictions["set_ratio_vertical_identity_delta"] = vertical_identity_delta
-    predictions["set_ratio_slant_slm_ratio"] = slm_slant_ratio
-    predictions["set_ratio_vertical_slm_ratio"] = slm_vertical_ratio
-    predictions["set_ratio_slant_model_output"] = slant_model_output
-    predictions["set_ratio_vertical_model_output"] = vertical_model_output
-    predictions["set_ratio_elevation_shrinkage_strength"] = shrinkage_strength
-    predictions["set_ratio_slant_correction_raw"] = slant_correction_raw
-    predictions["set_ratio_vertical_correction_raw"] = vertical_correction_raw
-    predictions["set_ratio_slant_correction"] = slant_correction
-    predictions["set_ratio_vertical_correction"] = vertical_correction
-    predictions["set_ratio_slant_ratio"] = slant_ratio
-    predictions["set_ratio_vertical_ratio"] = vertical_ratio
-    predictions["stec_set_ratio_mlp"] = source_stec_eval * slant_ratio
-    predictions["vtec_set_ratio_mlp"] = source_stec_eval * vertical_ratio
-    predictions["vtec_set_ratio_mlp_direct"] = predictions["vtec_set_ratio_mlp"]
-    predictions["vtec_set_ratio_mlp_error_iri"] = (
-        predictions["vtec_set_ratio_mlp"] - predictions[args.vtec_target_column]
-    )
-    predictions["vtec_set_ratio_mlp_abs_error_iri"] = predictions[
-        "vtec_set_ratio_mlp_error_iri"
-    ].abs()
+    slant_correction_raw = selection_outputs["slant_correction_raw"]
+    vertical_correction_raw = selection_outputs["vertical_correction_raw"]
+    slant_correction = selection_outputs["slant_correction"]
+    vertical_correction = selection_outputs["vertical_correction"]
+    slant_ratio = selection_outputs["slant_ratio"]
 
-    pred_path = save_table(
-        predictions, table_dir / f"{run_name}_predictions.{args.output_format}"
-    )
+    validation_predictions = selection_predictions if has_validation else None
+    test_predictions = None if has_validation else selection_predictions
+    test_bundle = None if has_validation else selection_bundle
+    validation_pred_path = None
+    test_pred_path = None
+    if has_validation:
+        validation_pred_path = save_table(
+            selection_predictions,
+            table_dir
+            / f"{run_name}_validation_predictions.{args.output_format}",
+        )
+        if not test_df.empty:
+            locked_test_context = build_evaluation_context(
+                train_df,
+                test_df,
+                inference_context=args.inference_context,
+            )
+            test_bundle = prepare_set_ratio_evaluation(
+                test_df,
+                locked_test_context,
+                args=args,
+                obs_cols=obs_cols,
+                q_imp=q_imp,
+                q_scaler=q_scaler,
+                o_imp=o_imp,
+                o_scaler=o_scaler,
+            )
+            test_predictions, _ = predict_set_ratio_evaluation(
+                model=model,
+                device=device,
+                y_scaler=y_scaler,
+                args=args,
+                bundle=test_bundle,
+            )
+            test_pred_path = save_table(
+                test_predictions,
+                table_dir / f"{run_name}_test_predictions.{args.output_format}",
+            )
+    else:
+        test_pred_path = save_table(
+            selection_predictions,
+            table_dir / f"{run_name}_predictions.{args.output_format}",
+        )
+
     epoch_metrics_path = None
     if epoch_metrics_rows:
-        epoch_metrics_path = table_dir / f"{run_name}_epoch_metrics.csv"
+        metrics_role = "validation_" if has_validation else ""
+        epoch_metrics_path = (
+            table_dir / f"{run_name}_{metrics_role}epoch_metrics.csv"
+        )
         epoch_metrics_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(epoch_metrics_rows).to_csv(epoch_metrics_path, index=False)
 
-    vtec_meta = None
+    validation_vtec_meta = None
+    test_vtec_meta = None
     if not args.skip_vtec_evaluation:
-        vtec_meta = build_vtec_metrics(
-            input_path=pred_path,
-            table_dir=table_dir,
-            run_name=f"{run_name}_test",
-            target_column=args.vtec_target_column,
-            baseline_column=args.baseline_vtec_column,
-            vtec_prediction_columns=["vtec_set_ratio_mlp", "vtec_set_ratio_mlp_direct"],
-            stec_prediction_columns=[],
-            mapping_column=args.mapping_column,
-            elevation_bins=[
-                float(s.strip()) for s in args.elevation_bins.split(",") if s.strip()
+        evaluation_kwargs = {
+            "table_dir": table_dir,
+            "target_column": args.vtec_target_column,
+            "baseline_column": args.baseline_vtec_column,
+            "vtec_prediction_columns": [
+                "vtec_set_ratio_mlp",
+                "vtec_set_ratio_mlp_direct",
             ],
-            station_min_count=args.station_min_count,
-            max_rows=None,
-        )
+            "stec_prediction_columns": [],
+            "mapping_column": args.mapping_column,
+            "elevation_bins": [
+                float(item.strip())
+                for item in args.elevation_bins.split(",")
+                if item.strip()
+            ],
+            "station_min_count": args.station_min_count,
+            "max_rows": None,
+        }
+        if validation_pred_path is not None:
+            validation_vtec_meta = build_vtec_metrics(
+                input_path=validation_pred_path,
+                run_name=f"{run_name}_validation",
+                **evaluation_kwargs,
+            )
+        if test_pred_path is not None:
+            test_vtec_meta = build_vtec_metrics(
+                input_path=test_pred_path,
+                run_name=f"{run_name}_test",
+                **evaluation_kwargs,
+            )
 
     train_pair_metric_name = (
         "train_pair_ratio"
@@ -2038,6 +2362,57 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             else "train_pair_slm_correction"
         )
     )
+
+    metric_summary: dict[str, Any] = {
+        "train_pair_training_target": regression_metrics(Y, train_pred_label),
+        train_pair_metric_name: regression_metrics(Y, train_pred_label),
+    }
+    if validation_predictions is not None:
+        metric_summary.update(
+            {
+                "validation_slant_stec": regression_metrics(
+                    validation_predictions[args.slant_target_column],
+                    validation_predictions["stec_set_ratio_mlp"],
+                ),
+                "validation_vtec": vtec_error_metrics(
+                    validation_predictions[args.vtec_target_column],
+                    validation_predictions["vtec_set_ratio_mlp"],
+                ),
+                "validation_slm_vtec": vtec_error_metrics(
+                    validation_predictions[args.vtec_target_column],
+                    validation_predictions[args.baseline_vtec_column],
+                ),
+            }
+        )
+    if test_predictions is not None:
+        metric_summary.update(
+            {
+                "test_slant_stec": regression_metrics(
+                    test_predictions[args.slant_target_column],
+                    test_predictions["stec_set_ratio_mlp"],
+                ),
+                "test_vtec": vtec_error_metrics(
+                    test_predictions[args.vtec_target_column],
+                    test_predictions["vtec_set_ratio_mlp"],
+                ),
+                "test_slm_vtec": vtec_error_metrics(
+                    test_predictions[args.vtec_target_column],
+                    test_predictions[args.baseline_vtec_column],
+                ),
+            }
+        )
+
+    output_files: dict[str, Any] = {}
+    if validation_pred_path is not None:
+        output_files["validation_predictions"] = str(validation_pred_path)
+    if test_pred_path is not None:
+        output_files["test_predictions"] = str(test_pred_path)
+        if not has_validation:
+            output_files["predictions"] = str(test_pred_path)
+    if validation_vtec_meta is not None:
+        output_files["validation_vtec_metrics"] = validation_vtec_meta["outputs"]
+    if test_vtec_meta is not None:
+        output_files["test_vtec_metrics"] = test_vtec_meta["outputs"]
 
     metadata: dict[str, Any] = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -2064,6 +2439,17 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "SLM source-to-query ratio. vtec_iri_ref is evaluation-only."
         ),
         "vtec_reference_used_for_training": False,
+        "model_selection": {
+            "enabled": bool(has_validation),
+            "selection_role": selection_role,
+            "criterion": "validation_vtec_rmse",
+            "selected_epoch": selected_epoch,
+            "selected_model_source": selected_model_source,
+            "best_validation_metric": best_validation_metric,
+            "locked_test_used_during_selection": False,
+            "evaluation_every": int(args.epoch_metrics_every),
+            "evaluation_epochs": sorted(epoch_metrics_epochs),
+        },
         "vertical_top_km": float(args.vertical_top_km),
         "query_geom_columns": QUERY_FEATURE_COLS,
         "obs_feature_columns": model_obs_cols,
@@ -2071,12 +2457,22 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             key: value for key, value in pair_stats.items()
             if not key.startswith("_")
         },
-        "slant_context_stats": slant_context_stats,
-        "vertical_context_stats": vert_context_stats,
+        "selection_context_role": selection_role,
+        "selection_slant_context_stats": slant_context_stats,
+        "selection_vertical_context_stats": vert_context_stats,
+        "test_slant_context_stats": (
+            None if test_bundle is None
+            else test_bundle["slant_context_stats"]
+        ),
+        "test_vertical_context_stats": (
+            None if test_bundle is None
+            else test_bundle["vertical_context_stats"]
+        ),
         "split": split_metadata,
         "row_counts": {
             "input": int(len(df)),
             "train_rows": int(len(train_df)),
+            "validation_rows": int(len(validation_df)),
             "test_rows": int(len(test_df)),
             "n_train_epochs": int(pd.to_datetime(train_df["timestamp"]).nunique())
             if "timestamp" in train_df.columns else None,
@@ -2093,7 +2489,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "shrinkage_power": float(args.shrinkage_power),
             "shrinkage_min_strength": float(args.shrinkage_min_strength),
             "epochs": int(args.epochs),
-            "epoch_metrics": epoch_metrics_enabled,
+            "epoch_metrics": bool(epoch_metrics_enabled or has_validation),
             "epoch_metrics_every": int(args.epoch_metrics_every),
             "epoch_metrics_epochs": sorted(epoch_metrics_epochs),
             "batch_size": int(args.batch_size),
@@ -2122,6 +2518,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "identity_delta_ipp_scale_km": float(args.identity_delta_ipp_scale_km),
             "inference_context": args.inference_context,
             "same_epoch_pairs": bool(args.same_epoch_pairs),
+            "validation_keys_from": args.validation_keys_from,
+            "test_keys_from": args.test_keys_from,
             "train_window_start": args.train_window_start,
             "train_window_end": args.train_window_end,
             "min_train_elevation_deg": None
@@ -2134,9 +2532,9 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         "history": history,
         "identity_delta_stats": {
             "train": _finite_stats(identity_delta),
-            "test_slant": _finite_stats(slant_identity_delta),
-            "test_vertical": _finite_stats(vertical_identity_delta),
-            "test_slant_identity_ratio": _ratio_identity_stats(
+            f"{selection_role}_slant": _finite_stats(slant_identity_delta),
+            f"{selection_role}_vertical": _finite_stats(vertical_identity_delta),
+            f"{selection_role}_slant_identity_ratio": _ratio_identity_stats(
                 slant_ratio, slant_identity_delta
             ),
         },
@@ -2146,23 +2544,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "raw_vertical_correction": _finite_stats(vertical_correction_raw),
             "shrunk_vertical_correction": _finite_stats(vertical_correction),
         },
-        "metrics": {
-            "train_pair_training_target": regression_metrics(Y, train_pred_label),
-            train_pair_metric_name: regression_metrics(Y, train_pred_label),
-            "test_slant_stec": regression_metrics(
-                predictions[args.slant_target_column],
-                predictions["stec_set_ratio_mlp"],
-            ),
-            "test_vtec": vtec_error_metrics(
-                predictions[args.vtec_target_column],
-                predictions["vtec_set_ratio_mlp"],
-            ),
-            "test_slm_vtec": vtec_error_metrics(
-                predictions[args.vtec_target_column],
-                predictions[args.baseline_vtec_column],
-            ),
-        },
-        "outputs": {"predictions": str(pred_path)},
+        "metrics": metric_summary,
+        "outputs": output_files,
     }
     if epoch_metrics_path is not None:
         metadata["outputs"]["epoch_metrics"] = str(epoch_metrics_path)
@@ -2170,14 +2553,18 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "n_rows": int(len(epoch_metrics_rows)),
             "columns": list(pd.DataFrame(epoch_metrics_rows).columns),
         }
-    if vtec_meta is not None:
-        metadata["outputs"]["vtec_metrics"] = vtec_meta["outputs"]
-
     ckpt_path = checkpoint_dir / f"{run_name}.pth"
+    metrics_json_path = table_dir / f"{run_name}_metrics.json"
+    metadata["outputs"]["checkpoint"] = str(ckpt_path)
+    metadata["outputs"]["metrics_json"] = str(metrics_json_path)
+    metadata["checkpoint_epoch"] = selected_epoch
+    metadata["checkpoint_selection_source"] = selected_model_source
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "model_state_dict": model.state_dict(),
+            "selected_epoch": selected_epoch,
+            "selection_metric": best_validation_metric,
             "q_imputer": q_imp,
             "q_scaler": q_scaler,
             "o_imputer": o_imp,
@@ -2187,10 +2574,7 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
         },
         ckpt_path,
     )
-    metadata["outputs"]["checkpoint"] = str(ckpt_path)
-    metadata["outputs"]["metrics_json"] = str(
-        write_json(metadata, table_dir / f"{run_name}_metrics.json")
-    )
+    write_json(metadata, metrics_json_path)
     return metadata
 
 
@@ -2247,7 +2631,25 @@ def parse_args(argv=None):
         ),
     )
     p.add_argument("--split", choices=["random", "time", "station", "prn", "all"], default="random")
-    p.add_argument("--test-keys-from")
+    p.add_argument(
+        "--validation-keys-from",
+        help=(
+            "Rows matching these keys form the validation set used for epoch "
+            "selection and best-checkpoint saving."
+        ),
+    )
+    p.add_argument(
+        "--validation-key-columns",
+        default="timestamp,station,prn",
+    )
+    p.add_argument(
+        "--test-keys-from",
+        help=(
+            "Rows matching these keys form the locked test set. With "
+            "--validation-keys-from, test truth is evaluated only after model "
+            "selection is complete."
+        ),
+    )
     p.add_argument("--test-key-columns", default="timestamp,station,prn")
     p.add_argument("--test-size", type=float, default=0.2)
     p.add_argument("--train-end")
@@ -2260,14 +2662,18 @@ def parse_args(argv=None):
         action="store_true",
         help=(
             "After selected epochs, evaluate VTEC conversion metrics on the "
-            "configured test/evaluation rows and save an epoch_metrics CSV."
+            "validation rows and save an epoch_metrics CSV. Legacy two-way "
+            "commands still evaluate their historical test/evaluation rows."
         ),
     )
     p.add_argument(
         "--epoch-metrics-every",
         type=int,
         default=1,
-        help="When --epoch-metrics is enabled, evaluate every N epochs.",
+        help=(
+            "Evaluate validation metrics every N epochs. Validation also "
+            "enables best-checkpoint selection automatically."
+        ),
     )
     p.add_argument(
         "--epoch-metrics-epochs",

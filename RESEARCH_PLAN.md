@@ -68,6 +68,31 @@ the means; improved VTEC conversion is the scientific endpoint.
    map, ML conversion error map, predicted/reference scatter, elevation-bin
    RMSE.
 
+## Publication Evaluation Protocol
+
+The main set-ratio route now uses explicit train, validation, and locked-test
+roles. Validation VTEC truth may select the epoch in controlled simulation, but
+locked-test VTEC truth must be used exactly once after all model and
+hyperparameter decisions are frozen.
+
+The former fixed UT05 key holdout has been reused across Experiments 042-057 for
+time-window, pair-budget, target-transform, shrinkage, and epoch choices. It is
+therefore formally classified as validation. Its best observed RMSE values are
+model-development evidence, not unbiased test performance.
+
+Required publication claims must use:
+
+1. A validation set for checkpoint and hyperparameter selection.
+2. A locked independent-day test set excluded from training, scaler fitting,
+   pair construction, and epoch selection.
+3. Additional station, PRN, constellation, and time holdouts.
+4. Multiple random seeds and uncertainty intervals.
+
+`src.train_set_ratio_mlp` saves the minimum-validation-RMSE checkpoint and
+evaluates a configured locked test only after restoring that checkpoint.
+Runs using the historical two-way protocol remain diagnostic and are not
+sufficient for final paper claims.
+
 ## Current Scope
 
 The implemented quick test builds one day:

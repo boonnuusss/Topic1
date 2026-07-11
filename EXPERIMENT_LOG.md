@@ -4441,3 +4441,108 @@ RMSE = 0.5586
 
 Keep the dynamic `UT04:00-08:00` run as a near-equivalent reference, but prefer
 the static density-matched result for simplicity and slightly better MAE/bias.
+
+## 2026-07-11 Experiment 058: Publication Three-Way Protocol
+
+### Purpose
+
+Experiments 042-057 repeatedly used the same UT05 key holdout for time-window,
+pair-budget, target-transform, shrinkage, and epoch selection. Although
+`vtec_iri_ref` was not a training label, repeated use of its metrics makes this
+set a validation set rather than an unbiased test set.
+
+This change introduces explicit train, validation, and locked-test roles and
+saves the minimum-validation-RMSE checkpoint.
+
+### Protocol Change
+
+`src.train_set_ratio_mlp` now supports:
+
+```text
+--validation-keys-from <validation keys>
+--validation-key-columns timestamp,station,prn
+--test-keys-from <locked test keys>
+--test-key-columns timestamp,station,prn
+```
+
+The validation and test key files must be disjoint. Both partitions are removed
+from training, scaler fitting, and pair construction. Validation VTEC metrics
+are computed at the configured epoch interval and select the checkpoint with
+minimum RMSE. The locked test is prepared and evaluated only after the selected
+validation state has been restored.
+
+Commands without `--validation-keys-from` retain backward-compatible behavior
+and are marked `legacy_two_way`.
+
+### UT05 Reclassification
+
+The historical key source is now validation:
+
+```text
+results/tables/set_ratio_mlp_0500_anchor1_e100_predictions.parquet
+```
+
+Accordingly, the Experiment 057 best curve point
+`RMSE = 0.5586 TECU` is a validation result. It must not be reported as final
+independent-test performance.
+
+### Validation
+
+Compilation and unit tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile src\train_set_ratio_mlp.py tests\test_set_ratio_protocol.py
+.\.venv\Scripts\python.exe -m unittest tests.test_set_ratio_protocol -v
+```
+
+All five tests passed. They cover disjoint three-way key assignment,
+validation-only mode, overlap rejection, three-role elevation filtering, and
+independent best-state cloning.
+
+A real-parquet validation-only smoke used the UT05 IRI simulation, 5000 pairs,
+and 2 epochs:
+
+- input rows: 2041
+- training rows after elevation filtering: 1163
+- validation rows after elevation filtering: 302
+- locked-test rows: 0
+- selected checkpoint epoch: 2
+- checkpoint source: `best_validation_rmse`
+
+A second one-epoch smoke added 12 disjoint temporary locked-test rays. Metadata
+recorded `protocol=train_validation_locked_test`,
+`locked_test_used_during_selection=false`, separate validation/test
+predictions, and separate VTEC metric tables. These 12 same-day rows are only a
+software-path smoke test and carry no scientific performance interpretation.
+
+A final one-epoch compatibility smoke omitted `--validation-keys-from` and used
+the historical random two-way split. It completed with 162 filtered training
+rows and 55 filtered test rows. Metadata recorded `protocol=legacy_two_way`,
+`model_selection.enabled=false`, and
+`checkpoint_selection_source=final_epoch_legacy_protocol`, confirming that old
+commands remain executable without being mistaken for the paper protocol.
+
+### Decision
+
+Use `scripts/train_set_ratio_paper_protocol.ps1` for future mainline runs.
+Do not run the locked-test branch for a paper claim until an independent-day key
+manifest is chosen and the model configuration is frozen.
+
+### Full-Run Attempt
+
+After the smoke tests, the Experiment 057 configuration was started through the
+new wrapper with 192,000 static pairs, 150 epochs, and validation every 5
+epochs. The CPU run started at approximately 01:56 local time and was stopped at
+approximately 03:58 after more than two hours without completing.
+
+The process remained responsive and CPU-active, so this was a runtime/resource
+decision rather than a model exception. The training entry point writes the
+epoch table and checkpoint after the loop, so no complete main-run artifact was
+produced and no new validation result is reported.
+
+This does not invalidate the protocol implementation: both real-parquet smoke
+paths completed and verified best-state restore metadata. A future full rerun
+should use an idle machine or GPU, and should consider validation-patience early
+stopping now that best-checkpoint state is available. The existing Experiment
+057 value remains historical validation evidence, not a newly reproduced
+checkpoint result.
