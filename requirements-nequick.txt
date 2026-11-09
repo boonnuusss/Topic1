@@ -1,0 +1,12 @@
+# Isolated environment for the PyPI NeQuick-G simulation builder.
+# nequick 1.0.0 sdist SHA-256:
+# d9b56c2d0082846053ef6437e173e85de01b824d4333f06f1a323ad393d5f5c7
+numpy==1.26.4
+nequick==1.0.0
+pandas==3.0.3
+scipy==1.16.3
+pyarrow==25.0.0
+pyproj==3.7.2
+scikit-learn==1.7.2
+PyYAML==6.0.3
+pytest==9.1.1

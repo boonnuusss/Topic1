@@ -51,6 +51,15 @@ IRI-backed simulation experiment for ML-assisted conversion.
 - [x] Save and restore the minimum-validation-RMSE checkpoint before final
   predictions.
 - [x] Reclassify the repeatedly reused UT05 key holdout as validation.
+- [x] Install PyPI JRC NeQuick-G in an isolated NumPy 1.x environment.
+- [x] Build the matching full-day NeQuick-G dataset from actual 2024-05-05
+  Galileo broadcast coefficients and repeat all physical mapping baselines.
+- [x] Add extended physical mapping benchmarks: SLM shell-height sweep, CODE
+  MSLM, fixed-profile multi-layer MF, training-partition IRI-calibrated APMF,
+  and the IRI ideal mapping-ratio oracle.
+- [x] Add a high-low CPP APMF whose pairing, fitting, and regularization
+  selection use STEC and geometry only; compare full-day and UT04-08 matched
+  calibration with the NeQuick-G Set-ratio model.
 - [ ] Validate the leading set-ratio anchor-only model under station, time, PRN,
   and independent-day splits.
 - [ ] Validate core RayMLP / Set-to-Query STEC-to-VTEC conversion on independent
@@ -85,6 +94,9 @@ model development. Then validate station, time, PRN, and constellation
 generalization with multiple seeds. Hybrid gates remain simulation diagnostics;
 they should not drive the main research direction because real observations do
 not provide VTEC truth for gate selection.
+
+Freeze the physical baseline configuration at the same time. Do not select a
+shell height or refit APMF using locked-test truth.
 
 ## Blocked / Needs User Decision
 

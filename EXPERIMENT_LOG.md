@@ -4546,3 +4546,303 @@ should use an idle machine or GPU, and should consider validation-patience early
 stopping now that best-checkpoint state is available. The existing Experiment
 057 value remains historical validation evidence, not a newly reproduced
 checkpoint result.
+
+## 2026-07-11 Experiment 059: Extended Physical Mapping Baselines
+
+### Purpose
+
+Strengthen the physical comparison before making ML claims. The benchmark now
+includes a shell-height sensitivity sweep, CODE MSLM, a fixed-profile
+multi-layer MF, an IRI-calibrated APMF, and the exact IRI mapping ratio as a
+simulation oracle.
+
+### Protocol
+
+- Input: full-day 5 min IRI simulation (`597,668` rows before key split).
+- Evaluation: historical UT05 validation keys, `419` rays (`302` at >=30 deg).
+- APMF fitting: `597,249` non-validation rays; 12 harmonics, 5-degree IPP
+  latitude bands, ridge alpha `1e-4`; no evaluation row used the global
+  fallback and no predicted vertical fraction was clipped.
+- SLM heights: `300, 350, 400, 450, 500, 550, 600 km`.
+- CODE MSLM: `H=506.7 km`, elevation scale `0.9782`.
+- Multi-layer: 192 shells from 90-2000 km at 10 km spacing; Chapman peak
+  350 km, scale height 70 km, plasmasphere density ratio 100 and scale height
+  10,000 km. The normalized profile has mean shell height 471.28 km.
+- IRI oracle: `stec_iri_observable / vtec_iri_ref`; evaluation truth is used
+  directly and therefore its zero error is definitional.
+
+### Results
+
+| Method | RMSE >=10 | MAE >=10 | Bias >=10 | RMSE >=30 | MAE >=30 | Bias >=30 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLM 350 km | 1.5446 | 1.0261 | -0.1332 | 0.9378 | 0.6693 | -0.2812 |
+| SLM 400 km | 1.8471 | 1.1017 | +0.5152 | 0.8491 | 0.6347 | +0.0232 |
+| SLM 450 km | 2.4400 | 1.4326 | +1.1364 | 0.9285 | 0.6842 | +0.3186 |
+| CODE MSLM | 4.2321 | 2.7934 | +2.7739 | 1.7738 | 1.3006 | +1.2737 |
+| Multi-layer Chapman | 2.2274 | 1.3275 | +1.0210 | 0.9266 | 0.6858 | +0.3271 |
+| IRI-calibrated APMF | **0.9465** | **0.6544** | +0.2417 | **0.6069** | **0.4402** | -0.1197 |
+| IRI ideal oracle | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+
+### Interpretation
+
+The best fixed SLM height depends on the elevation regime: 350 km is best over
+all rays, while 400 km is best for the >=30-degree scientific regime. Therefore
+450 km must remain a conventional reference, not the only physical comparator.
+
+The fixed multi-layer MF only slightly improves the 450 km SLM overall and is
+essentially tied above 30 degrees. A vertical profile alone cannot represent
+the horizontal gradients sampled by a slant ray. CODE MSLM performs poorly for
+this IRI scenario; its conventional parameters are not automatically optimal
+for regional STEC-to-VTEC conversion.
+
+IRI-calibrated APMF reaches 0.6069 TECU above 30 degrees, close to the best ML
+validation results. This is an important stronger comparator, but it uses IRI
+VTEC/STEC to fit coefficients and is not directly deployable when real VTEC
+truth is absent. The ideal ratio is an oracle ceiling only. Final paper claims
+must compare frozen physical and ML configurations on an independent locked
+test rather than selecting either family on these UT05 validation metrics.
+
+### Outputs
+
+```text
+results/tables/physical_mapping_baselines_ut05_validation_predictions.parquet
+results/tables/physical_mapping_baselines_ut05_validation_metrics.csv
+results/tables/physical_mapping_baselines_ut05_validation_metadata.json
+```
+
+## 2026-07-12 Experiment 060: NeQuick-G Physical Mapping Replication
+
+### Purpose
+
+Test whether the IRI physical-baseline conclusions persist under a second
+empirical ionosphere model. The experiment uses the PyPI JRC NeQuick-G C
+extension and exactly the same full-day ray keys and UT05 validation keys.
+
+### Environment And Inputs
+
+- Isolated environment: `.venv-nequick`.
+- `nequick==1.0.0`, `numpy==1.26.4`; package `pip check` passed.
+- All 11 tests shipped in the PyPI source distribution passed.
+- Navigation source: IGS/BKG
+  `BRDC00IGS_R_20241260000_01D_MN.rnx.gz`.
+- Navigation SHA-256:
+  `a2cd62f68dabcadcd5b47bbf573f35b4859f5b5fbb449a6786831493175eca47`.
+- Unique Galileo coefficients: `a0=142.0`, `a1=0.15234`, `a2=0.010101`.
+- Integration bounds: 90-2000 km for both slant and IPP-vertical paths.
+- Integration: built-in NeQuick-G Gauss-Kronrod; coordinate order is
+  longitude, latitude, altitude in meters.
+
+### Dataset Build
+
+The full-day build completed in about 54 seconds with 10 workers:
+
+| Quantity | Value |
+| --- | ---: |
+| epochs | 288 |
+| ray rows | 597,668 |
+| missing STEC/VTEC | 0 |
+| mean NeQuick-G STEC | 56.4309 TECU |
+| mean NeQuick-G VTEC | 37.2249 TECU |
+| mean 450 km SLM bias | +0.3049 TECU |
+
+The NeQuick-G and IRI tables have a one-to-one match for all 597,668
+`timestamp,station,prn` keys. Across the full day, NeQuick-G versus IRI
+correlation is 0.9722 for STEC and 0.9712 for VTEC. NeQuick-G mean values are
+lower than IRI, so the comparison is a background-model sensitivity test, not
+an expectation that both models produce equal TEC.
+
+### UT05 Validation Results
+
+APMF was fitted on 597,249 non-validation rays and evaluated on the same 419
+UT05 validation rays. All latitude bands were fitted; no global fallback was
+used. Two APMF vertical fractions reached the physical upper clip of 1.0.
+
+| Method | RMSE >=10 | MAE >=10 | Bias >=10 | RMSE >=30 | MAE >=30 | Bias >=30 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLM 400 km | 2.2428 | 1.5819 | -0.2032 | 1.9491 | 1.4078 | -0.1560 |
+| SLM 450 km | 2.3096 | 1.7074 | +0.3508 | **1.9224** | 1.4297 | +0.1095 |
+| CODE MSLM | 3.3038 | 2.5085 | +1.8133 | 2.2202 | 1.7302 | +0.9688 |
+| Multi-layer Chapman | 2.2480 | 1.6580 | +0.2487 | 1.9254 | 1.4319 | +0.1174 |
+| NeQuick-calibrated APMF | **0.6805** | **0.4952** | -0.1704 | **0.5547** | **0.4064** | -0.2871 |
+| NeQuick ideal oracle | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+
+For all elevations, the best fixed shell is 400 km. For elevation >=30 deg,
+450 km is marginally best among fixed SLM heights, but the multi-layer result
+is effectively tied. CODE MSLM is again worse than the conventional SLMs.
+
+The calibrated APMF is strong under both background models: RMSE is 0.6069
+TECU for IRI and 0.5547 TECU for NeQuick-G at elevation >=30 deg. This supports
+the value of azimuth/local-time structure, but APMF uses model VTEC/STEC during
+training and remains an empirical simulation comparator rather than a
+truth-free real-observation method.
+
+### IRI-NeQuick-G RMSE Discrepancy Audit
+
+The high full-day correlations of the absolute fields (0.9722 for STEC and
+0.9712 for VTEC) do not imply that the two models have the same mapping
+behavior. SLM error is controlled by the much smaller residual between the
+model-specific ideal mapping factor, `STEC / VTEC`, and the elevation-only SLM
+factor. On the 302 validation rays at elevation >=30 deg:
+
+| Quantity | IRI | NeQuick-G |
+| --- | ---: | ---: |
+| mean ideal mapping factor | 1.26950 | 1.26659 |
+| ideal factor versus SLM relative residual RMS | 1.4917% | 2.9777% |
+| SLM 450 km RMSE | 0.9285 TECU | 1.9224 TECU |
+| SLM 450 km bias | +0.3186 TECU | +0.1095 TECU |
+
+The ideal IRI and NeQuick-G mapping factors remain strongly correlated
+(`r=0.9713`), but their difference has an RMSE of 0.0474 in mapping-factor
+units. NeQuick-G therefore has about twice the relative mapping residual of
+IRI, which is sufficient to produce about twice the VTEC RMSE. The NeQuick-G
+error is mainly directional variance rather than a constant bias. For example,
+its SLM bias is -1.8031 TECU for azimuth [0,45) deg and +1.8718 TECU for
+[135,180) deg. This azimuth-dependent sign change is consistent with horizontal
+ionospheric gradients that an elevation-only SLM cannot represent.
+
+Implementation checks found no evidence that the discrepancy is caused by the
+formal dataset builder or baseline evaluator:
+
+- IRI and NeQuick-G use the same 419 validation keys and the same elevation.
+- Their 450 km SLM mapping factors are identical row by row.
+- Recomputing 20 NeQuick-G slant rays from stored ECEF geometry reproduced the
+  stored STEC exactly; the clipped endpoints were within `1e-5 m` of 90 and
+  2000 km.
+- Replacing the stored IPP by a geometric 450 km IPP changed the NeQuick-G
+  high-elevation RMSE only from 1.9224 to 1.9143 TECU.
+- Extending NeQuick-G paths from ground to satellite did not close the gap; it
+  increased the high-elevation SLM RMSE to 2.876 TECU.
+
+One unit hazard was identified for ad hoc calls: the table column `sat_h` is in
+kilometres, whereas the PyPI NeQuick-G API expects metres. The production
+builder is unaffected because it clips paths directly from receiver/satellite
+ECEF coordinates and passes metre-valued endpoints. The audit supports treating
+the RMSE difference as sensitivity to background-model mapping structure, not
+as an established code defect.
+
+### Outputs
+
+```text
+datasets/interim/nequickg_simulation_20240505_0000_2400_5min.parquet
+results/tables/nequickg_physical_mapping_baselines_ut05_validation_metrics.csv
+results/tables/nequickg_physical_mapping_baselines_ut05_validation_metadata.json
+results/tables/iri_nequickg_physical_baseline_comparison.csv
+results/tables/iri_nequickg_mapping_ratio_audit.csv
+```
+
+## 2026-07-12 Experiment 061: NeQuick-G Static 192k Pair Set-Ratio Model
+
+### Purpose
+
+Repeat the IRI static density-matched set-ratio experiment on the NeQuick-G
+simulation and compare it with the NeQuick-G physical mapping baselines. This
+is a validation experiment on the established UT05 keys, not a locked-test
+result.
+
+### Configuration
+
+- Input: full-day NeQuick-G 5 min simulation, 597,668 rays and 288 epochs.
+- Train window: UT04:00-08:00; 48 epochs and 69,550 rays after the 30 deg cut.
+- Training pairs: 192,000 fixed same-epoch pairs, 4,000 per epoch; no dynamic
+  resampling and no cross-epoch pairs.
+- Model: set-ratio MLP, log SLM-correction target, elevation-dependent
+  shrinkage, one source-anchor observation, seed 42, CPU.
+- Training: 25 epochs, batch size 1024; validation at epochs 5, 10, 15, 20,
+  and 25.
+- Columns: `stec_nequickg_observable`, `stec_nequickg_ray`,
+  `vtec_nequickg_ref`, `vtec_slm_from_nequickg_stec`, and
+  `slm_mapping_factor_nequickg`.
+- NeQuick-G VTEC was not used to construct training targets or pairs; it was
+  used only for validation scoring and checkpoint selection.
+- Runtime: 4,300.7 s (about 71 min 41 s) on CPU.
+
+### Validation Results
+
+The best validation checkpoint was the final epoch 25. All results below use
+the same 302 UT05 validation rays at elevation >=30 deg.
+
+| Method | RMSE | MAE | Bias | R2 |
+| --- | ---: | ---: | ---: | ---: |
+| NeQuick ideal oracle | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
+| NeQuick-calibrated APMF | **0.5547** | **0.4064** | -0.2871 | 0.9986 |
+| Set-ratio MLP, epoch 25 | 1.2918 | 0.9717 | +0.0467 | 0.9926 |
+| SLM 450 km / best fixed SLM | 1.9224 | 1.4297 | +0.1095 | 0.9836 |
+| Multi-layer Chapman | 1.9254 | 1.4319 | +0.1174 | 0.9836 |
+| CODE MSLM | 2.2202 | 1.7302 | +0.9688 | 0.9781 |
+
+The set-ratio model reduces RMSE by 0.6306 TECU (32.80%) relative to the 450 km
+SLM, while remaining 0.7371 TECU worse than the model-calibrated APMF. The
+result shows that learned SLM correction transfers to the NeQuick-G simulation
+and captures part of its direction-dependent mapping structure. It does not
+yet match APMF, and APMF itself is a simulation comparator that uses NeQuick-G
+STEC/VTEC outside the validation partition rather than a truth-free deployable
+baseline.
+
+### Outputs
+
+```text
+results/checkpoints/set_ratio_mlp_nequickg_tw0400_0800_static_log_p192k_e25.pth
+results/tables/set_ratio_mlp_nequickg_tw0400_0800_static_log_p192k_e25_validation_predictions.parquet
+results/tables/set_ratio_mlp_nequickg_tw0400_0800_static_log_p192k_e25_validation_epoch_metrics.csv
+results/tables/set_ratio_mlp_nequickg_tw0400_0800_static_log_p192k_e25_metrics.json
+results/tables/nequickg_set_ratio_static_log_p192k_e25_vs_physical_ut05_validation.csv
+```
+
+## 2026-07-12 Experiment 062: STEC-Only High-Low CPP APMF
+
+### Purpose
+
+Replace privileged NeQuick-G VTEC/STEC calibration with the high-low
+coinciding-pierce-point route of Huo et al. (2024), then compare it with the
+Set-ratio model under a common no-VTEC-training constraint. The historical
+UT05 keys remain validation rather than locked test data.
+
+### Method
+
+- High ray: elevation strictly above 70 deg.
+- Low ray: elevation in `[10,30)` deg.
+- Pairing: same timestamp and the published 0.4 deg latitude and
+  longitude/cos(latitude) CPP tolerances; all valid pairs are retained.
+- Vertical proxy: `STEC_high / CODE_MSLM_slant_factor(high_elevation)`.
+- APMF target: `VTEC_proxy / STEC_low`.
+- APMF: 12 azimuth and 12 local-time harmonics in 5 deg IPP-latitude bands.
+- Ridge selection: five-fold timestamp-grouped CPP cross-validation over
+  `1e-4, 1e-3, 1e-2, 0.1, 1, 10, 100`; criterion is CPP fraction RMSE only.
+- Simulated VTEC columns are excluded from the CPP builder's input allowlist
+  and are used only for final validation metrics.
+
+The full day produced 9,110 CPP pairs from 6,191 unique low rays and 6,818
+unique high rays across all 288 epochs. CPP cross-validation selected
+`ridge_alpha=1.0`. The UT04:00-08:00 matched window produced 1,261 pairs from
+911 low rays and 981 high rays across 48 epochs and independently selected the
+same regularization.
+
+### UT05 Validation Results
+
+All values use the same 302 rays at elevation >=30 deg.
+
+| Method | Calibration information | RMSE | MAE | Bias | R2 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| NeQuick ideal oracle | validation VTEC | 0.0000 | 0.0000 | 0.0000 | 1.0000 |
+| NeQuick-truth APMF | full-day training VTEC/STEC | 0.5547 | 0.4064 | -0.2871 | 0.9986 |
+| CPP APMF, full day | STEC/geometry only | 1.0205 | 0.7797 | -0.6078 | 0.9954 |
+| Set-ratio, UT04-08 | STEC/geometry only | **1.2918** | 0.9717 | +0.0467 | 0.9926 |
+| CPP APMF, UT04-08 | STEC/geometry only | 1.3259 | **0.8934** | -0.3475 | 0.9922 |
+| SLM 450 km | geometry only | 1.9224 | 1.4297 | +0.1095 | 0.9836 |
+
+With matched UT04-08 data coverage, Set-ratio improves RMSE by 0.0341 TECU
+(2.57%) over CPP APMF and has substantially smaller absolute bias, while CPP
+APMF has lower MAE. Full-day CPP calibration improves to 1.0205 TECU, showing
+that broader temporal/geometry coverage materially benefits the empirical
+mapping coefficients. The 0.5547 TECU truth-calibrated APMF remains a
+privileged simulation comparator and must not be used as the fair no-VTEC
+baseline.
+
+### Outputs
+
+```text
+results/tables/nequickg_physical_mapping_baselines_ut05_validation_cpp_pairs.parquet
+results/tables/nequickg_physical_mapping_baselines_ut05_validation_cpp_tw0400_0800_cpp_pairs.parquet
+results/tables/nequickg_physical_mapping_baselines_ut05_validation_cpp_tw0400_0800_metrics.csv
+results/tables/nequickg_set_ratio_static_log_p192k_e25_vs_physical_ut05_validation.csv
+```

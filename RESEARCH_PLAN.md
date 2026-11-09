@@ -28,6 +28,10 @@ the means; improved VTEC conversion is the scientific endpoint.
 - H6: Local IPP context matters. IPP-nearby ray pairs and set-to-query models
   should be preferred over identity-only slant training when the goal is
   STEC-to-VTEC conversion.
+- H7: ML gains must be compared with a stronger physical benchmark family,
+  including shell-height sensitivity, CODE MSLM, and a multi-layer profile.
+  IRI-calibrated APMF and the exact IRI ratio are simulation references, not
+  truth-free operational baselines.
 
 ## Required Datasets
 
@@ -38,6 +42,8 @@ the means; improved VTEC conversion is the scientific endpoint.
   ray-wise STEC simulation labels.
 - Optional later data: GIM or another independent VTEC product for external
   validation after the IRI simulation route is stable.
+- JRC NeQuick-G simulation driven by Galileo broadcast `ai0/ai1/ai2`, used as
+  an independent empirical background-model sensitivity experiment.
 
 ## Key Observables
 
@@ -56,6 +62,8 @@ the means; improved VTEC conversion is the scientific endpoint.
 2. Physical conversion baseline: single-layer mapping
    `VTEC_slm = STEC_obs / M(elevation)`, with shell height and mapping formula
    recorded.
+   The benchmark family must also report the shell-height sweep, CODE MSLM,
+   and a fixed-profile multi-layer MF.
 3. IRI-backed simulation dataset with documented reference VTEC and simulated
    ray-wise STEC labels.
 4. Ray-wise ML STEC model trained in the simulation setting, with IPP-nearby
@@ -92,6 +100,24 @@ Required publication claims must use:
 evaluates a configured locked test only after restoring that checkpoint.
 Runs using the historical two-way protocol remain diagnostic and are not
 sufficient for final paper claims.
+
+The same partition rule applies to empirical physical functions. APMF
+coefficients are fitted only on the training partition; validation/test VTEC is
+used only for scoring. The exact IRI STEC/VTEC ratio is labeled an oracle and
+must never be presented as an available real-observation method.
+
+For a truth-free empirical comparison, the NeQuick-G benchmark additionally
+fits APMF from same-epoch high-low coinciding-pierce-point pairs. The fit uses
+only STEC, elevation, azimuth, IPP coordinates, and local time. A high-elevation
+CODE-MSLM conversion supplies the vertical proxy, and regularization is chosen
+only from held-out CPP proxy ratios. Both full-day and UT04:00-08:00 matched-
+window calibration must be shown; the latter is the fair comparison with the
+current Set-ratio run.
+
+The physical benchmark is now repeated with NeQuick-G on the same ray keys and
+90-2000 km integration bounds. This tests whether shell-height and APMF
+conclusions are specific to IRI. NeQuick-G results remain validation evidence
+until an independent locked day is evaluated.
 
 ## Current Scope
 

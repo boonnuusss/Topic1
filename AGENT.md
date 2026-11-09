@@ -34,11 +34,12 @@ are legacy/off-mainline unless a task explicitly reactivates them.
 Before editing or running experiments, read:
 
 1. `RESEARCH_PLAN.md`
-2. `DATA_DICTIONARY.md`
-3. `IRI_SIMULATION_SCHEMA.md`
-4. `TODO.md`
-5. `EXPERIMENT_LOG.md`
-6. `FAILED_ATTEMPTS.md`
+2. `NEW_COMPUTER_HANDOFF.md`
+3. `DATA_DICTIONARY.md`
+4. `IRI_SIMULATION_SCHEMA.md`
+5. `TODO.md`
+6. `EXPERIMENT_LOG.md`
+7. `FAILED_ATTEMPTS.md`
 
 ## Important Rules
 
@@ -87,6 +88,16 @@ E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe --versi
 ```
 
 which returned `Python 3.12.3`.
+
+NeQuick-G commands are the exception. Use the isolated interpreter:
+
+```powershell
+E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv-nequick\Scripts\python.exe
+```
+
+It intentionally pins NumPy 1.26.4 because PyPI `nequick==1.0.0` is
+incompatible with the main NumPy 2.x environment. Do not install NeQuick into
+`.venv` or silently upgrade `.venv-nequick` to NumPy 2.x.
 
 ## Current Data Convention
 

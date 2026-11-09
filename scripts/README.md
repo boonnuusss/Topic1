@@ -67,6 +67,31 @@ vtec_slm = stec_obs / slm_mapping_factor
 
 Use `-MaxRows 1000` for a smoke test.
 
+## Extended Physical Mapping Baselines
+
+Evaluate the physical baseline family on the fixed UT05 validation keys:
+
+```powershell
+.\scripts\evaluate_physical_mapping_baselines.ps1
+```
+
+The wrapper uses the full-day 5 min IRI simulation for APMF fitting, excludes
+the validation keys from that fit, and writes predictions, metrics, and full
+method/coefficient metadata under `results/tables/`. SLM, CODE MSLM, and the
+fixed multi-layer profile are truth-free. APMF is IRI-calibrated on training
+data; the IRI ideal ratio is an oracle upper bound.
+
+For NeQuick-G, the same wrapper also writes a STEC-only high-low CPP pair table
+and evaluates its APMF. Match CPP calibration to the Set-ratio training window
+with:
+
+```powershell
+.\scripts\evaluate_nequickg_physical_baselines.ps1 `
+  -RunName nequickg_physical_mapping_baselines_ut05_validation_cpp_tw0400_0800 `
+  -CppTrainWindowStart 2024-05-05T04:00:00 `
+  -CppTrainWindowEnd 2024-05-05T08:00:00
+```
+
 ## VTEC Diagnostic Plots
 
 ```powershell
@@ -117,6 +142,29 @@ The builder writes `stec_iri_ray`, `vtec_iri_ref`,
 `vtec_slm_from_iri_stec`, and VTEC-space SLM error columns. It calls the
 vendored PyIRI package under `../00_iri/PyIRI` and records all IRI/grid/ray
 integration settings in metadata.
+
+## NeQuick-G Simulation Builder
+
+Install and verify the isolated PyPI environment, download the day-126 Galileo
+navigation coefficients, then build the matching full-day simulation:
+
+```powershell
+.\scripts\install_nequick.ps1
+.\scripts\verify_nequick_install.ps1
+.\scripts\download_nequickg_navigation.ps1
+.\scripts\build_nequickg_simulation.ps1
+```
+
+The builder writes one parquet part per 5 min epoch and reuses valid parts after
+an interruption. It extracts only ray geometry from the IRI table and computes
+new NeQuick-G STEC/VTEC targets between 90 and 2000 km.
+
+Repeat the physical baseline matrix and create the cross-model table with:
+
+```powershell
+.\scripts\evaluate_nequickg_physical_baselines.ps1
+.\.venv-nequick\Scripts\python.exe -m src.compare_physical_mapping_baselines
+```
 
 ## VTEC-Space Metrics
 
@@ -396,3 +444,17 @@ Train RayMLP residual learning:
   -Epochs 30 `
   -RunName residual_ray_mlp_random
 ```
+
+## NeQuick-G Set-Ratio Validation
+
+Run the static density-matched NeQuick-G protocol with 192,000 fixed pairs and
+25 training epochs:
+
+```powershell
+.\scripts\train_set_ratio_nequickg_paper_protocol.ps1
+```
+
+The wrapper uses UT04:00-08:00 for training, evaluates the fixed UT05
+validation keys every five epochs, and explicitly selects the NeQuick-G STEC,
+VTEC, SLM VTEC, and mapping-factor columns. It does not configure a locked test
+partition, so its metrics are validation results.

@@ -129,6 +129,66 @@ simulation adds controlled reference targets and SLM conversion diagnostics.
 | `vtec_slm_from_iri_stec` | SLM conversion of simulated observable STEC, `stec_iri_observable / slm_mapping_factor_iri` | TECU |
 | `vtec_slm_error_iri` | SLM VTEC error, `vtec_slm_from_iri_stec - vtec_iri_ref` | TECU |
 | `vtec_slm_abs_error_iri` | Absolute SLM VTEC error | TECU |
+
+## Extended Physical Mapping Prediction Columns
+
+These evaluation-only columns are produced by
+`python -m src.physical_mapping_baselines`.
+
+| Column pattern | Meaning | Unit / Type |
+| --- | --- | --- |
+| `mapping_factor_slm_h{height}` | Classical STEC/VTEC thin-shell factor at the named shell height | unitless |
+| `vtec_slm_h{height}` | `stec_iri_observable / mapping_factor_slm_h{height}` | TECU |
+| `mapping_factor_code_mslm` | CODE MSLM STEC/VTEC factor with `H=506.7 km`, `alpha=0.9782` | unitless |
+| `vtec_code_mslm` | CODE MSLM conversion | TECU |
+| `mapping_factor_multilayer_chapman` | Vertical-content-weighted thin-shell sum for the fixed Chapman/plasmasphere profile | unitless |
+| `vtec_multilayer_chapman` | Fixed-profile multi-layer conversion | TECU |
+| `vertical_fraction_apmf_iri_calibrated` | APMF estimate of VTEC/STEC, fitted from training-partition IRI values | unitless |
+| `mapping_factor_apmf_iri_calibrated` | Reciprocal APMF STEC/VTEC factor | unitless |
+| `vtec_apmf_iri_calibrated` | IRI-calibrated APMF conversion; not truth-free | TECU |
+| `apmf_global_fallback` | Whether the evaluation row used global rather than latitude-band coefficients | bool |
+| `mapping_factor_iri_ideal_oracle` | Exact simulated `stec_iri_observable / vtec_iri_ref` ratio | unitless |
+| `vtec_iri_ideal_oracle` | Oracle reconstruction used only as a simulation upper bound | TECU |
+
+High-low CPP pair tables contain only STEC and geometry/time inputs from the
+source dataset plus these derived audit columns:
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `cpp_source_row_index` | Original low-elevation ray row index | integer |
+| `cpp_high_source_row_index` | Original high-elevation ray row index | integer |
+| `cpp_high_elevation_deg` | Elevation of the high ray, strictly above 70 degrees by default | degree |
+| `cpp_high_stec` | Observed STEC on the high ray | TECU |
+| `cpp_vtec_proxy` | `cpp_high_stec / CODE_MSLM_factor(high_elevation)` | TECU |
+| `cpp_vertical_fraction` | STEC-only proxy for `VTEC/STEC_low` | unitless |
+| `cpp_latitude_delta_deg` | Absolute high-low IPP latitude difference | degree |
+| `cpp_scaled_longitude_delta_deg` | Published longitude/cos(latitude) CPP difference | degree |
+| `cpp_normalized_distance` | Maximum CPP coordinate difference normalized by tolerances | unitless |
+
+The builder uses an explicit input-column allowlist; simulated IRI/NeQuick-G
+VTEC columns are not copied into CPP pair artifacts.
+
+## NeQuick-G Simulation Columns
+
+These columns are produced by `python -m src.nequickg_simulation_builder`.
+The row keys and ray geometry match the full-day 5 min IRI simulation.
+
+| Column | Meaning | Unit / Type |
+| --- | --- | --- |
+| `stec_nequickg_ray` | JRC NeQuick-G integral along the receiver-satellite ray clipped to 90-2000 km | TECU |
+| `stec_nequickg_observable` | Bias-free observable; initially equal to `stec_nequickg_ray` | TECU |
+| `vtec_nequickg_ref` | NeQuick-G vertical integral at the IRI IPP, 90-2000 km | TECU |
+| `stec_nequickg_method` | Slant integration method identifier | string |
+| `vtec_nequickg_ref_method` | Vertical integration method identifier | string |
+| `nequickg_lower_altitude_km` | Lower integration boundary | km |
+| `nequickg_upper_altitude_km` | Upper integration boundary | km |
+| `slm_mapping_factor_nequickg` | 450 km SLM STEC/VTEC factor | unitless |
+| `vtec_slm_from_nequickg_stec` | 450 km SLM conversion of NeQuick-G STEC | TECU |
+| `vtec_slm_error_nequickg` | SLM conversion minus `vtec_nequickg_ref` | TECU |
+| `vtec_slm_abs_error_nequickg` | Absolute NeQuick-G SLM conversion error | TECU |
+
+NeQuick-G receives coordinates in `(longitude, latitude, altitude_m)` order.
+Its PyPI extension performs Gauss-Kronrod TEC integration internally.
 | `ray_integral_n_samples` | Number of samples used along the receiver-satellite ray | integer |
 | `ray_integral_min_alt_km` | Minimum sampled ray altitude | km |
 | `ray_integral_max_alt_km` | Maximum sampled ray altitude | km |

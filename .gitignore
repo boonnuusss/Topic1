@@ -1,4 +1,5 @@
 .venv/
+.venv-nequick/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -13,6 +14,7 @@ Thumbs.db
 manuscript/
 
 # Generated datasets and experiment outputs
+datasets/raw/*
 datasets/interim/*
 datasets/processed/*
 results/tables/*
@@ -29,6 +31,7 @@ results/logs/*
 *.joblib
 
 !datasets/interim/.gitkeep
+!datasets/raw/.gitkeep
 !datasets/processed/.gitkeep
 !results/tables/.gitkeep
 !results/figures/.gitkeep

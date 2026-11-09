@@ -86,6 +86,8 @@ them back into the STEC-to-VTEC conversion design.
 New coding agents should read these files before making changes:
 
 - `AGENT.md`: long-term rules for scientific coding agents.
+- `NEW_COMPUTER_HANDOFF.md`: clone, environment, ignored-asset restoration,
+  current results, and exact continuation instructions for another computer.
 - `RESEARCH_PLAN.md`: scientific question, hypotheses, datasets, and risks.
 - `DATA_DICTIONARY.md`: processed table schema, units, and provenance.
 - `IRI_SIMULATION_SCHEMA.md`: IRI-backed simulation targets, integration
@@ -121,6 +123,14 @@ Or call it directly:
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.dataset_builder --config configs/quick_test.yaml
+```
+
+NeQuick-G uses an isolated environment because `nequick==1.0.0` requires
+NumPy 1.x while the main ML environment uses NumPy 2.x:
+
+```powershell
+.\scripts\install_nequick.ps1
+.\activate_nequick.ps1
 ```
 
 For Codex agents, prefer the absolute interpreter path when running validation
@@ -187,6 +197,51 @@ VTEC_slm = STEC_obs / M(elevation)
 
 This is the traditional SLM conversion baseline. It does not predict STEC; it
 maps observed STEC to a vertical TEC estimate.
+
+## Extended Physical Mapping Baselines
+
+The IRI simulation benchmark now compares more than the default 450 km SLM:
+
+```powershell
+.\scripts\evaluate_physical_mapping_baselines.ps1
+```
+
+`src.physical_mapping_baselines` evaluates SLM shell heights 300-600 km, CODE
+MSLM (`H=506.7 km`, `alpha=0.9782`), a fixed Chapman-plus-plasmasphere
+multi-layer MF, an IRI-calibrated APMF, and the exact IRI mapping ratio. The
+historical 419-ray UT05 key set is treated as validation and is excluded from
+APMF coefficient fitting.
+
+These methods have different scientific roles. SLM, CODE MSLM, and the fixed
+multi-layer profile are truth-free geometric/physical baselines. APMF uses IRI
+VTEC/STEC on the training partition to estimate latitude-banded azimuth/local-
+time coefficients, so it is an empirical simulation reference rather than a
+deployable truth-free baseline. `mapping_factor_iri_ideal_oracle =
+stec_iri_observable / vtec_iri_ref` uses evaluation truth directly and is only
+the simulation upper bound.
+
+The same benchmark is implemented for the PyPI JRC NeQuick-G model. It uses the
+2024-05-05 Galileo broadcast coefficients from the IGS/BKG RINEX navigation
+file and integrates both slant and IPP-vertical paths between 90 and 2000 km:
+
+```powershell
+.\scripts\download_nequickg_navigation.ps1
+.\scripts\build_nequickg_simulation.ps1
+.\scripts\evaluate_nequickg_physical_baselines.ps1
+```
+
+The NeQuick-G benchmark also includes a STEC-only high-low CPP APMF adapted
+from Huo et al. (2024). Same-epoch rays above 70 degrees and from 10-30 degrees
+are paired with the published 0.4-degree CPP rule. The high ray is converted to
+a VTEC proxy with CODE MSLM; no simulated VTEC column is available to pair
+construction, coefficient fitting, or ridge selection. Five-fold epoch-grouped
+CPP cross-validation selects regularization. A UT04:00-08:00 calibration run is
+reported beside the full-day calibration so its data coverage matches the
+leading Set-ratio experiment.
+
+IRI and NeQuick-G use identical 597,668 ray keys, but different numerical
+integration implementations: IRI uses the project's regular-grid trapezoidal
+route, whereas NeQuick-G uses its built-in Gauss-Kronrod integration.
 
 ## IRI Simulation Target
 

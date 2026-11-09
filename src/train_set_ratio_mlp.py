@@ -2436,7 +2436,8 @@ def train_set_ratio_mlp(args: argparse.Namespace) -> dict[str, Any]:
             "target_STEC/source_STEC. In slm_correction mode, the training "
             "target is (target_STEC/source_STEC) divided by the SLM geometric "
             "ratio, and inference multiplies the predicted correction by the "
-            "SLM source-to-query ratio. vtec_iri_ref is evaluation-only."
+            f"SLM source-to-query ratio. {args.vtec_target_column} is "
+            "evaluation-only."
         ),
         "vtec_reference_used_for_training": False,
         "model_selection": {

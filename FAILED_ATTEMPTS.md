@@ -128,3 +128,22 @@ E:\Scientific_Research\work_2026\STEC_ML\Topic1\.venv\Scripts\python.exe --versi
 
 This succeeded and returned `Python 3.12.3`. Future commands should use the
 same interpreter path instead of a bare `python`.
+
+## Pitfall: NeQuick Side-Environment Resolver Upgrade
+
+Installing unpinned current pandas/SciPy/scikit-learn after `nequick==1.0.0`
+caused pip to upgrade NumPy from 1.26.4 to 2.5.1 even though NeQuick requires
+`numpy<2.0`. SciPy 1.18 also requires NumPy 2.x. The reproducible solution is
+the isolated `requirements-nequick.txt` combination with NumPy 1.26.4, SciPy
+1.16.3, and scikit-learn 1.7.2, followed by `pip check`.
+
+## Pitfall: Weakly Regularized 12th-Order CPP APMF
+
+The strict Huo et al.-style high-low CPP fit produced only 9,110 full-day pairs.
+Using the truth-calibrated APMF default `ridge_alpha=1e-4` with 49 coefficients
+per latitude band was unstable: 59 evaluation fractions hit the upper physical
+clip and the elevation >=30 deg RMSE reached 6.3198 TECU. The CPP vertical proxy
+itself was accurate (post-hoc VTEC-proxy RMSE 0.5821 TECU), so the failure was
+coefficient variance rather than a broken pair target. Select regularization by
+timestamp-grouped CPP fraction cross-validation without VTEC. This chose
+`ridge_alpha=1.0`, removed upper clipping, and reduced RMSE to 1.0205 TECU.
