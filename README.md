@@ -96,6 +96,12 @@ New coding agents should read these files before making changes:
 - `EXPERIMENT_LOG.md`: reproducibility log for data builds and figures.
 - `FAILED_ATTEMPTS.md`: known pitfalls and fixes.
 
+For the November 2026 computer migration, generated research assets are
+temporarily available through the split archive on remote branch
+`artifact-transfer-20261109`, documented in `artifacts/README.md`. Temporarily
+switch to that branch and run `scripts/restore_transferred_artifacts.ps1` on the
+destination computer.
+
 ## Layout
 
 - `src/`: reusable Python modules and command-line entry points.

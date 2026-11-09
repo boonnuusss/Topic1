@@ -153,6 +153,28 @@ Copy artifacts only after cloning so the Git working tree remains clean. Do not
 use `git add -f` to upload them. Before trusting copied parquet/checkpoint files,
 compare file sizes and preferably SHA-256 hashes between computers.
 
+### Temporary Git branch migration bundle
+
+For the November 2026 computer migration, the required ignored assets are also
+packaged as split ZIP chunks on the remote branch
+`artifact-transfer-20261109`. On the new computer, restore them with:
+
+```powershell
+git pull origin main
+git fetch origin artifact-transfer-20261109
+git switch -c artifact-transfer-20261109 `
+  --track origin/artifact-transfer-20261109
+.\scripts\restore_transferred_artifacts.ps1
+git switch main
+git branch -D artifact-transfer-20261109
+```
+
+The script reconstructs the ZIP in the system temporary directory, verifies its
+SHA-256, and extracts only `datasets/` and `results/`. This is a temporary
+migration mechanism, not a replacement for a versioned scientific data
+repository. Delete the remote transfer branch after the new computer confirms
+the restored assets.
+
 ## 8. Rebuild Order When Artifacts Are Not Copied
 
 1. Edit the two YAML data roots.

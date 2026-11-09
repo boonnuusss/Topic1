@@ -19,3 +19,6 @@
 *.onnx binary
 *.pkl binary
 *.joblib binary
+
+# Binary chunks used by the temporary artifact-transfer branch.
+artifacts/parts/*.part??? binary
